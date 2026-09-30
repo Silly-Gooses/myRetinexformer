@@ -337,16 +337,8 @@ class RetinexFormer_Single_Stage(nn.Module):
         output_img = self.denoiser(input_img,illu_fea)
 
         return output_img
-
-  # Debug / analysis only
-    def forward_with_intermediate(self, img):
-        illu_fea, illu_map = self.estimator(img)
-
-        input_img = img * illu_map + img
-        output_img = self.denoiser(input_img, illu_fea)
-
-        return input_img, output_img
-
+    
+    
 
 class RetinexFormer(nn.Module):
     def __init__(self, in_channels=3, out_channels=3, n_feat=31, stage=3, num_blocks=[1,1,1]):

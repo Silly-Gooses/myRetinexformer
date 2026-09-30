@@ -1,7 +1,6 @@
 import os
 import argparse
 import time
-from tqdm.auto import tqdm
 from dataLoader import get_dataloaders
 import logging
 
@@ -9,13 +8,7 @@ from RetinexFormer_arch import RetinexFormer
 # from waveletRetinexFormer import RetinexFormer
 
 import torch
-import torch.nn as nn
-import numpy as np
-import torch.nn.functional as F
-from skimage import img_as_ubyte
-import math
-import cv2
-from utils import PSNR, calculate_ssim
+from analysis_utils import evaluate
 
 parser = argparse.ArgumentParser(description='RetinexFormer Testing Script')
 parser.add_argument('--dataset', type=str, help='dataset name', choices=['LOLv1', 'LOLv2_synthetic', 'LOLv2_real'], required=True)
@@ -23,55 +16,7 @@ parser.add_argument('--dataset', type=str, help='dataset name', choices=['LOLv1'
 
     
 def test(model, loader, device, logger):
-    psnr_list = []
-    ssim_list = []
-    factor = 4  # Padding factor for image dimensions
-    
-    model.eval()
-    
-    loader_tqdm = tqdm(loader, desc="Validation", unit="batch", leave=False)
-    
-    with torch.no_grad():
-        for data_batch in loader_tqdm:
-            name = data_batch['name']
-            input_ = data_batch['low']
-            target = data_batch['high']
-
-            # Padding in case images are not multiples of 4
-            h, w = input_.shape[2], input_.shape[3]
-            H = ((h + factor - 1) // factor) * factor
-            W = ((w + factor - 1) // factor) * factor
-            padh = H - h
-            padw = W - w
-            input_ = F.pad(input_, (0, padw, 0, padh), mode='reflect')
-          
-            restored = model(input_.to(device))
-
-            # Unpad restored images back to original dimensions
-            restored = restored[:, :, :h, :w]
-
-            # Process image-by-image to handle batch dimension cleanly
-            batch_size = input_.size(0)
-            for i in range(batch_size):
-                # Convert single image from Tensor (C, H, W) to Numpy (H, W, C)
-                target_img = target[i].cpu().permute(1, 2, 0).numpy()
-                restored_img = torch.clamp(restored[i], 0, 1).cpu().permute(1, 2, 0).numpy()
-
-                img_name = name[i] if isinstance(name, (list, tuple)) else name
-
-                # Compute metrics for individual image
-                val_psnr = PSNR(target_img, restored_img)
-                val_ssim = calculate_ssim(img_as_ubyte(target_img), img_as_ubyte(restored_img))
-
-                # logger.info(f"Image: {img_name}, PSNR: {val_psnr:.2f}, SSIM: {val_ssim:.4f}")
-
-                psnr_list.append(val_psnr)
-                ssim_list.append(val_ssim)
-
-    mean_psnr = np.mean(psnr_list)
-    mean_ssim = np.mean(ssim_list)          
-
-    return mean_psnr, mean_ssim
+    return evaluate(model, loader, device)
 
 
 if __name__ == '__main__':

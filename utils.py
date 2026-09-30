@@ -4,10 +4,18 @@ import cv2
 
 
 def PSNR(img1, img2):
-    mse_ = np.mean((img1 - img2) ** 2)
+    """PSNR in dB for matching 8-bit images (peak value 255).
+
+    Convert before subtraction so uint8 values cannot wrap around.
+    An exact match retains the project's historical 100 dB convention.
+    """
+    if np.shape(img1) != np.shape(img2):
+        raise ValueError('Input images must have the same dimensions.')
+    diff = np.asarray(img1, dtype=np.float64) - np.asarray(img2, dtype=np.float64)
+    mse_ = np.mean(diff ** 2)
     if mse_ == 0:
         return 100
-    return 10 * math.log10(1 / mse_)
+    return 10 * math.log10((255.0 ** 2) / mse_)
 
 def calculate_ssim(img1, img2, border=0):
     '''calculate SSIM
