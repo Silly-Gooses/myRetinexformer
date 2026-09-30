@@ -367,6 +367,15 @@ class RetinexFormer(nn.Module):
 
         return out
 
+    def forward_with_intermediate(self, x):
+        """Return stage-ordered light-up and restored images for analysis."""
+        lightup_images, output_images = [], []
+        for stage in self.body:
+            lightup, x = stage.forward_with_intermediate(x)
+            lightup_images.append(lightup)
+            output_images.append(x)
+        return lightup_images, output_images
+
 
 # if __name__ == '__main__':
 #     from fvcore.nn import FlopCountAnalysis
