@@ -1,43 +1,51 @@
-# LOLv2 Real checkpoint comparison
+# LOL-v2 Real author-versus-retrained analysis
 
-This analysis uses the existing test dataset and checkpoints. It does not run
-training or modify model weights. The standard `forward()` method and the
-training notebook remain unchanged.
+This inference-only workflow compares the official author checkpoint and a
+retrained checkpoint with the same low-light input. It does not train models or
+change the normal `forward()` behavior.
 
-In Colab, mount Google Drive and make this repository the working directory.
-Run the three-image smoke test first:
-
-```bash
-python compare_models.py \
-  --output-dir /content/drive/MyDrive/retinexformer_analysis
-```
-
-Inspect `smoke/review.md` and its comparison grids. Check that the low and
-ground-truth panels match, that the light-up and output panels have sensible
-brightness and colors, and that `smoke/summary.json` contains finite metrics.
-Then run the full dataset:
+Install dependencies after cloning:
 
 ```bash
-python compare_models.py \
-  --output-dir /content/drive/MyDrive/retinexformer_analysis \
-  --full
+pip install -r requirements.txt
 ```
 
-The default paths match the Colab training notebook. Override any location with
-`--dataset-root`, `--author-checkpoint`, or `--ours-checkpoint`. The dataset root
-must contain `Test/Low` and `Test/Normal`. The author checkpoint must contain
-`params`; the trained checkpoint must contain `model`. Both are loaded strictly
-into the notebook's single-stage architecture.
+Run a five-image smoke test with explicit paths:
 
-The output directory contains `author/metrics.csv`, `ours/metrics.csv`,
-`comparison.csv`, `summary.json`, and `review.md`. Each model's `images/`
-directory contains its low, ground truth, final light-up, final output, and
-per-stage images. The `improved/`, `similar/`, and `degraded/` folders contain
-six-panel comparison grids and matching source images for every test pair.
-Results under `smoke/` are separate from full-set results.
+```bash
+python analysis/compare_author_vs_retrained.py \
+  --author_ckpt /path/to/LOL_v2_real.pth \
+  --retrained_ckpt /path/to/best_psnr.pth \
+  --low_dir /path/to/LOLv2/Real_captured/Test/Low \
+  --gt_dir /path/to/LOLv2/Real_captured/Test/Normal \
+  --output_dir results/author_vs_retrained_smoke \
+  --max_images 5
+```
 
-PSNR and SSIM use the repository's existing 8-bit RGB metric functions on the
-clipped, rounded pixels saved in PNGs. The default grouping threshold is
-`±0.5 dB`; change it with `--threshold`. Group labels are an analysis
-convention. `review.md` lists representative cases and prompts for visual
-inspection; it makes no unverified claims about image quality.
+For the complete LOL-v2 Real test set, use the same command without
+`--max_images`:
+
+```bash
+python analysis/compare_author_vs_retrained.py \
+  --author_ckpt /path/to/LOL_v2_real.pth \
+  --retrained_ckpt /path/to/best_psnr.pth \
+  --low_dir /path/to/LOLv2/Real_captured/Test/Low \
+  --gt_dir /path/to/LOLv2/Real_captured/Test/Normal \
+  --output_dir results/author_vs_retrained
+```
+
+The script requires exact low/GT filename pairs and processes them in sorted
+order. It supports direct state dictionaries and common `params`, `model`,
+`state_dict`, and nested `checkpoint` wrappers. A uniform DataParallel
+`module.` prefix is removed; all model weights are then loaded strictly.
+
+The output directory contains lossless PNGs in `low/`, `author_litup/`,
+`retrained_litup/`, `author_output/`, `retrained_output/`, `gt/`, and `grids/`,
+as well as `per_image_analysis.csv` and `summary.csv`.
+
+Final outputs are scored against ground truth using PSNR/SSIM. The output group
+uses retrained-minus-author PSNR: Improved at `≥ +0.5 dB`, Degraded at
+`≤ −0.5 dB`, otherwise Similar. The Lit-up image is
+`input × illumination_map + input`; it has no dedicated ground truth target.
+It is therefore analyzed neutrally through luminance, dark/highlight ratios,
+MAE, and Author-vs-Retrained SSIM instead of Lit-up-to-GT quality scores.
