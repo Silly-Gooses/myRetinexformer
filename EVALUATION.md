@@ -49,3 +49,10 @@ uses retrained-minus-author PSNR: Improved at `≥ +0.5 dB`, Degraded at
 `input × illumination_map + input`; it has no dedicated ground truth target.
 It is therefore analyzed neutrally through luminance, dark/highlight ratios,
 MAE, and Author-vs-Retrained SSIM instead of Lit-up-to-GT quality scores.
+
+`per_image_analysis.csv` also includes `author_litup_psnr`,
+`retrained_litup_psnr`, `litup_psnr_delta`, `author_litup_ssim`,
+`retrained_litup_ssim`, and `litup_ssim_delta`. These are Author Lit-up vs GT,
+Retrained Lit-up vs GT, and retrained-minus-author deltas. They use the same
+saved 8-bit RGB metric implementation as final-output metrics, but are
+explicitly diagnostic-only because GT is not a true Lit-up-stage target.

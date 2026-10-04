@@ -133,7 +133,19 @@ class AnalysisPipelineTests(unittest.TestCase):
                 csv_rows = list(csv.DictReader(file))
             self.assertEqual(len(csv_rows), 1)
             self.assertIn("author_vs_retrained_litup_mae", csv_rows[0])
+            self.assertIn("author_litup_psnr", csv_rows[0])
+            self.assertIn("litup_ssim_delta", csv_rows[0])
             self.assertIn("combined_group", csv_rows[0])
+            self.assertAlmostEqual(
+                float(csv_rows[0]["litup_psnr_delta"]),
+                float(csv_rows[0]["retrained_litup_psnr"]) -
+                float(csv_rows[0]["author_litup_psnr"]),
+            )
+            self.assertAlmostEqual(
+                float(csv_rows[0]["litup_ssim_delta"]),
+                float(csv_rows[0]["retrained_litup_ssim"]) -
+                float(csv_rows[0]["author_litup_ssim"]),
+            )
             self.assertTrue((output_dir / "summary.csv").is_file())
 
     def test_stage_path_matches_forward(self):

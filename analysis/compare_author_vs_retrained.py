@@ -150,6 +150,14 @@ def analyze(args):
         retrained_psnr, retrained_ssim = image_metrics(
             images["retrained_output"], images["gt"]
         )
+        # GT is the final normal-light target, not a true Lit-up target. These
+        # values are retained only to diagnose stage-wise model differences.
+        author_litup_psnr, author_litup_ssim = image_metrics(
+            images["author_litup"], images["gt"]
+        )
+        retrained_litup_psnr, retrained_litup_ssim = image_metrics(
+            images["retrained_litup"], images["gt"]
+        )
         diagnostics = litup_diagnostics(
             images["author_litup"], images["retrained_litup"], args.dark_threshold,
             args.highlight_threshold,
@@ -167,6 +175,12 @@ def analyze(args):
             "author_output_ssim": author_ssim,
             "retrained_output_ssim": retrained_ssim,
             "output_ssim_delta": delta_ssim,
+            "author_litup_psnr": author_litup_psnr,
+            "retrained_litup_psnr": retrained_litup_psnr,
+            "litup_psnr_delta": retrained_litup_psnr - author_litup_psnr,
+            "author_litup_ssim": author_litup_ssim,
+            "retrained_litup_ssim": retrained_litup_ssim,
+            "litup_ssim_delta": retrained_litup_ssim - author_litup_ssim,
             **diagnostics,
             "output_group": output_group,
             "litup_group": litup_group,
@@ -180,6 +194,8 @@ def analyze(args):
 PER_IMAGE_FIELDS = (
     "filename", "author_output_psnr", "retrained_output_psnr", "output_psnr_delta",
     "author_output_ssim", "retrained_output_ssim", "output_ssim_delta",
+    "author_litup_psnr", "retrained_litup_psnr", "litup_psnr_delta",
+    "author_litup_ssim", "retrained_litup_ssim", "litup_ssim_delta",
     "author_litup_mean_luminance", "retrained_litup_mean_luminance",
     "litup_mean_luminance_delta", "author_litup_dark_ratio",
     "retrained_litup_dark_ratio", "author_litup_highlight_ratio",
@@ -200,6 +216,8 @@ def write_reports(rows, args):
         field: float(np.mean([row[field] for row in rows])) for field in (
             "author_output_psnr", "retrained_output_psnr", "output_psnr_delta",
             "author_output_ssim", "retrained_output_ssim", "output_ssim_delta",
+            "author_litup_psnr", "retrained_litup_psnr", "litup_psnr_delta",
+            "author_litup_ssim", "retrained_litup_ssim", "litup_ssim_delta",
             "author_litup_mean_luminance", "retrained_litup_mean_luminance",
             "litup_mean_luminance_delta", "author_litup_dark_ratio",
             "retrained_litup_dark_ratio", "author_litup_highlight_ratio",
