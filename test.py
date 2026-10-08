@@ -72,7 +72,7 @@ if __name__ == '__main__':
 
     train_loader, test_loader = get_dataloaders(low_dir_train, normal_dir_train, low_dir_test, normal_dir_test,use_mixup=True)
 
-    model = RetinexFormer(in_channels=3, out_channels=3, n_feat=40, stage=1, num_blocks=[1, 2, 2])
+    model = RetinexFormer(in_channels=3, out_channels=3, n_feat=40, stage=1, num_blocks=[1, 2, 2], edge_guidance=False)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     model.to(device)
 

@@ -7,6 +7,8 @@ import warnings
 from torch.nn.init import _calculate_fan_in_and_fan_out
 from pdb import set_trace as stx
 
+from canny import CannyEdgeDetector
+
 
 def _no_grad_trunc_normal_(tensor, mean, std, a, b):
     def norm_cdf(x):
@@ -283,7 +285,7 @@ class Denoiser(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x, illu_fea):
+    def forward(self, x, illu_fea, residual=None):
         """
         x:          [b,c,h,w]         x是feature, 不是image
         illu_fea:   [b,c,h,w]
@@ -315,66 +317,129 @@ class Denoiser(nn.Module):
             fea = LeWinBlcok(fea,illu_fea)
 
         # Mapping
-        out = self.mapping(fea) + x
+        # Version 1: guidance channels never enter the RGB residual addition.
+        out = self.mapping(fea) + (x if residual is None else residual)
 
         return out
 
 
 class RetinexFormer_Single_Stage(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, n_feat=31, level=2, num_blocks=[1, 1, 1]):
-        super(RetinexFormer_Single_Stage, self).__init__()
+    def __init__(self, in_channels=3, out_channels=3, n_feat=31, level=2,
+                 num_blocks=[1, 1, 1], edge_guidance=True, canny_config=None):
+        super().__init__()
+        if edge_guidance and (in_channels != 3 or out_channels != 3):
+            raise ValueError("Canny guidance requires RGB input and output")
+        self.edge_guidance = edge_guidance
+        self.edge_extractor = CannyEdgeDetector(**(canny_config or {})) if edge_guidance else None
         self.estimator = Illumination_Estimator(n_feat)
-        self.denoiser = Denoiser(in_dim=in_channels,out_dim=out_channels,dim=n_feat,level=level,num_blocks=num_blocks)  #### 将 Denoiser 改为 img2img
-    
-    def forward(self, img):
-        # img:        b,c=3,h,w
-        
-        # illu_fea:   b,c,h,w
-        # illu_map:   b,c=3,h,w
+        self.denoiser = Denoiser(in_dim=in_channels + int(edge_guidance),
+                                out_dim=out_channels, dim=n_feat, level=level,
+                                num_blocks=num_blocks)
+        if edge_guidance:
+            # Version 1: begin with no edge contribution, but allow it to learn.
+            with torch.no_grad():
+                self.denoiser.embedding.weight[:, 3:].zero_()
 
+    def _forward(self, img, edge_map=None):
+        if self.edge_guidance and edge_map is None:
+            edge_map = self.edge_extractor(img)
         illu_fea, illu_map = self.estimator(img)
-        input_img = img * illu_map + img
-        output_img = self.denoiser(input_img,illu_fea)
+        lit_up = img * illu_map + img
+        denoiser_input = lit_up
+        if self.edge_guidance:
+            # Version 1: Canny complements the unchanged illumination guidance.
+            denoiser_input = torch.cat([lit_up, edge_map.to(dtype=lit_up.dtype)], dim=1)
+        output = self.denoiser(denoiser_input, illu_fea, residual=lit_up)
+        return lit_up, output, edge_map
 
-        return output_img
+    def forward(self, img, edge_map=None):
+        return self._forward(img, edge_map)[1]
 
-  # Debug / analysis only
-    def forward_with_intermediate(self, img):
-        illu_fea, illu_map = self.estimator(img)
-
-        input_img = img * illu_map + img
-        output_img = self.denoiser(input_img, illu_fea)
-
-        return input_img, output_img
+    def forward_with_intermediate(self, img, return_dict=False, *, edge_map=None):
+        lit_up, output, edge = self._forward(img, edge_map)
+        if return_dict:
+            return {"input": img, "edge": edge, "lit_up": lit_up, "output": output}
+        return lit_up, output
 
 
 class RetinexFormer(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, n_feat=31, stage=3, num_blocks=[1,1,1]):
-        super(RetinexFormer, self).__init__()
+    def __init__(self, in_channels=3, out_channels=3, n_feat=31, stage=3,
+                 num_blocks=[1, 1, 1], edge_guidance=True, canny_config=None):
+        super().__init__()
+        if not isinstance(stage, int) or stage < 1:
+            raise ValueError("stage must be a positive integer")
         self.stage = stage
+        self.edge_guidance = edge_guidance
+        self.body = nn.Sequential(*[
+            RetinexFormer_Single_Stage(
+                in_channels=in_channels, out_channels=out_channels, n_feat=n_feat,
+                level=2, num_blocks=num_blocks, edge_guidance=edge_guidance,
+                canny_config=canny_config)
+            for _ in range(stage)
+        ])
+        self.canny_config = (dict(self.body[0].edge_extractor.config)
+                             if edge_guidance else None)
 
-        modules_body = [RetinexFormer_Single_Stage(in_channels=in_channels, out_channels=out_channels, n_feat=n_feat, level=2, num_blocks=num_blocks)
-                        for _ in range(stage)]
-        
-        self.body = nn.Sequential(*modules_body)
-    
-    def forward(self, x):
-        """
-        x: [b,c,h,w]
-        return out:[b,c,h,w]
-        """
-        out = self.body(x)
-
-        return out
-
-    def forward_with_intermediate(self, x):
-        """Return stage-ordered light-up and restored images for analysis."""
-        lightup_images, output_images = [], []
+    def _forward(self, x, capture=False):
+        original = x
+        # Version 1: extract once from the original low-light RGB, not stage outputs.
+        edge = self.body[0].edge_extractor(x) if self.edge_guidance else None
+        lightups, outputs = [], []
         for stage in self.body:
-            lightup, x = stage.forward_with_intermediate(x)
-            lightup_images.append(lightup)
-            output_images.append(x)
-        return lightup_images, output_images
+            if capture:
+                lit_up, x = stage.forward_with_intermediate(x, edge_map=edge)
+                lightups.append(lit_up)
+                outputs.append(x)
+            else:
+                x = stage(x, edge_map=edge)
+        if capture:
+            return {"input": original, "edge": edge, "lit_up": lightups[-1],
+                    "output": x, "lit_up_stages": lightups, "output_stages": outputs}
+        return x
+
+    def forward(self, x):
+        """Return enhanced RGB [B, 3, H, W]."""
+        return self._forward(x)
+
+    def forward_with_intermediate(self, x, return_dict=False):
+        """Preserve legacy stage lists; optionally include named Canny diagnostics."""
+        result = self._forward(x, capture=True)
+        if return_dict:
+            return result
+        return result["lit_up_stages"], result["output_stages"]
+
+    def load_baseline_state_dict(self, state_dict):
+        """Explicitly convert baseline RGB embeddings, then load all weights strictly.
+
+        Accept an unwrapped state dict with canonical keys. Return the converted
+        keys and emit a warning so baseline initialization is never silent.
+        Optimizer state from a baseline run must not be resumed into v1.
+        """
+        if not self.edge_guidance:
+            raise ValueError("Baseline conversion requires edge_guidance=True")
+        expected = self.state_dict()
+        if set(state_dict) != set(expected):
+            missing = sorted(set(expected) - set(state_dict))
+            unexpected = sorted(set(state_dict) - set(expected))
+            raise RuntimeError(f"Baseline state dict keys differ: missing={missing}, unexpected={unexpected}")
+        embeddings = {f"body.{i}.denoiser.embedding.weight" for i in range(self.stage)}
+        converted = {}
+        for key, target in expected.items():
+            source = state_dict[key]
+            required = (target.shape[0], 3, *target.shape[2:]) if key in embeddings else target.shape
+            if not torch.is_tensor(source) or tuple(source.shape) != tuple(required):
+                raise RuntimeError(f"Baseline shape mismatch for {key}: expected {tuple(required)}")
+            if key in embeddings:
+                expanded = source.new_zeros(target.shape)
+                expanded[:, :3].copy_(source)
+                converted[key] = expanded
+            else:
+                converted[key] = source
+        self.load_state_dict(converted, strict=True)
+        keys = sorted(embeddings)
+        warnings.warn("Version 1: copied baseline RGB weights and zero-initialized edge channels: "
+                      + ", ".join(keys), UserWarning, stacklevel=2)
+        return keys
 
 
 # if __name__ == '__main__':

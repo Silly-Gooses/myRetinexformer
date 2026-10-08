@@ -97,7 +97,8 @@ def _create_output_dirs(output_dir):
 def _model(device):
     # This is the LOL-v2 Real architecture used by this repository's notebook.
     return RetinexFormer(
-        in_channels=3, out_channels=3, n_feat=40, stage=1, num_blocks=[1, 2, 2]
+        in_channels=3, out_channels=3, n_feat=40, stage=1, num_blocks=[1, 2, 2],
+        edge_guidance=False  # This command compares two baseline checkpoints.
     ).to(device)
 
 
