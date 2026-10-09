@@ -102,19 +102,21 @@ print(converted_keys)  # Also reported by a warning during conversion.
 All other keys and shapes must match. Native v1 checkpoints load directly with
 `model.load_state_dict(...)`. Canny configuration is not part of the tensor
 state dict: preserve it with the checkpoint and reconstruct the model with the
-same settings. Notebook checkpoints record version, architecture, and Canny
-configuration; full resume checks version and Canny settings.
+same settings. Notebook checkpoints record version, architecture, Canny configuration, and the
+complete epoch-training state. Resume validates the saved configuration and split.
 
 Fresh v1 models also start with zero edge-channel weights. These remain trainable
 and receive gradients. Baseline conversion preserves initial baseline output to
 floating-point tolerance. Use a fresh optimizer after conversion: baseline
 optimizer states have incompatible embedding dimensions.
 
-The notebook still trains from scratch. Its branch setup selects `v1`, its
-experiment is `Lightweight_RetinexFormer_v1_LOLv2_real_Full`, and smoke paths also
-include `v1`. Commit/push the branch separately before using the remote Colab
-setup. The author-versus-retrained analysis section and `test.py` explicitly
-use baseline mode for their existing baseline checkpoints.
+The notebook trains from scratch on branch `v1` using 200 epochs, including
+3 warm-up epochs, in `Lightweight_RetinexFormer_v1_LOLv2_real_Epoch200`.
+It reserves 10% of training pairs for validation and uses the official test set
+only for final evaluation. See [EPOCH_TRAINING.md](EPOCH_TRAINING.md) for configuration,
+logging, and resume. Commit/push separately before using remote Colab setup.
+Baseline comparison is no longer in the notebook; standalone comparison scripts
+and `test.py` still explicitly use baseline mode.
 
 ## Verification
 
