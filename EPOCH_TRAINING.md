@@ -7,6 +7,29 @@ iteration training and baseline comparison cells have been removed. Architecture
 Canny defaults, Adam betas `(0.9, 0.999)`, batch size 8, patch size 256, and L1 loss
 remain unchanged. AMP remains off by default.
 
+## Smoke check or full training
+
+Choose `RUN_MODE` in the notebook configuration cell. The default is `"smoke"`;
+the separate smoke/full training cells execute only the selected mode, including
+when using Run all.
+
+- Smoke runs three complete epochs using the unchanged 200-epoch schedule, so
+  all three are warm-up epochs. It saves under `<EXPERIMENT_NAME>_Smoke3`, with
+  best/last checkpoints, an epoch-3 CSV row, curves and validation visuals at
+  epochs 1 and 3. The curves mark individual points so the single CSV row is visible.
+- Full runs all configured epochs under the original `<EXPERIMENT_NAME>` folder.
+  After inspecting smoke results, set `RUN_MODE="full"`, `RESUME_FROM=None`, and
+  re-run configuration, split and model setup, then the full training cell. This
+  resets the seed, loaders, model and optimizer for independent training from scratch.
+- Resume requires the same mode/folder and `RESUME_FROM=CKPT_DIR / "last.pth"`.
+  Fresh runs never overwrite existing folders; change `EXPERIMENT_NAME` for another
+  smoke check or independent full experiment. Existing full-run checkpoints retain
+  their original path and configuration compatibility.
+
+Use validation metrics and the saved Low / Edge / Lit-up / Output / GT grids to
+check smoke results. The final official-test cell skips smoke mode. A three-epoch
+warm-up run checks execution and saved artifacts, not final restoration quality.
+
 ## Schedule
 
 All settings are editable in the configuration cell:
@@ -85,17 +108,25 @@ Files are saved via a temporary file in the same directory and replaced only
 once written. This avoids overwriting a valid local checkpoint with a partial
 write; it does not guarantee Google Drive's remote synchronization during a
 runtime failure. `last.pth` is the authoritative committed epoch. Its history
-rebuilds CSV on resume, removing stale/duplicate rows. `best.pth` is written before
+rebuilds CSV at the selected reporting interval on resume, removing stale/duplicate rows. `best.pth` is written before
 `last.pth`; a crash between these writes is recovered by replaying that epoch.
 Checkpoints use tensors and primitive types and load with `weights_only=True`.
 
 ## Outputs and checks
 
-Every epoch logs train/validation L1, validation PSNR/SSIM, LR actually used,
+Validation and checkpoint updates still run every epoch. The notebook uses
+`LOG_EVERY=3` for CSV/console output: epochs 3, 6, ..., 198, and 200 (67 rows).
+Each row reports that epoch, not an average of the preceding three epochs.
+Checkpoint history retains every epoch for resume. `LOG_EVERY` is a presentation
+setting, outside the strict training configuration, so existing checkpoints can
+resume with the new reporting interval. The helper defaults to `log_every=1`
+for compatibility; the notebook passes its explicit setting.
+
+Reported fields are train/validation L1, train/validation PSNR and SSIM, LR actually used,
 global step, epoch/cumulative processing time, and best flag. Times include
 validation/visual generation but exclude checkpoint I/O and disconnected time.
-Fixed validation examples are saved at epoch 1, every 10 epochs, and the final
-epoch: Low / Edge / Lit-up / Output / GT, both individual PNGs and a five-panel
+Fixed validation examples are saved at epoch 1, every 10 epochs, and the last
+epoch of the selected run (including an early smoke stop): Low / Edge / Lit-up / Output / GT, both individual PNGs and a five-panel
 grid. The curve cell plots loss, validation metrics and LR. Final test evaluation
 loads `best.pth`, exports all test images and per-image/average metrics.
 
@@ -121,3 +152,50 @@ validation and five-panel Canny exports. Full training is not run by these tests
   were created successfully. This was a CPU smoke run, not the 200-epoch experiment.
 - Python/notebook syntax and `git diff --check` passed. GPU epoch training remains
   unverified on this CPU-only environment.
+
+
+### Training PSNR/SSIM and existing runs
+
+`train_psnr` and `train_ssim` are mean per-image scores over all augmented crops
+seen in that epoch, including the final partial batch. Each score uses the
+prediction from that batch's training forward, before its optimizer update.
+The metrics detach the predictions and use the same clamped/rounded 8-bit RGB
+PSNR/SSIM functions as validation. There is no additional model inference pass;
+CPU image conversion and SSIM calculation do add measurement overhead. Crops
+must be at least 11×11 for the existing SSIM window.
+
+Validation uses full images with the final model state for that epoch in eval
+mode. Thus train/validation curves share a metric definition but differ in data,
+augmentation and model state; they are diagnostic curves, not accuracy percentages
+or a controlled full-image generalization-gap measurement. Best selection remains
+based only on validation PSNR.
+
+Existing epoch checkpoints can resume without changing training configuration.
+Historical epochs that did not record training PSNR/SSIM keep blank CSV fields;
+those values cannot be reconstructed from the last checkpoint. New epochs record
+both metrics, and notebook plots show gaps for unavailable history rather than
+inventing zeros. CSV/console still report every 3 epochs plus the final epoch;
+checkpoint history keeps all epoch metrics for recovery.
+
+### Logging/metric verification (2026-10-10)
+
+- Full regression suite: 30 tests run, 28 passed, two CUDA tests skipped because
+  CUDA is unavailable. This includes exact uninterrupted/resumed worker training,
+  per-image training metric weighting, unchanged optimizer updates, legacy metric
+  history recovery, and three-epoch logging with best selection between log rows.
+- Re-executed the notebook workflow on temporary synthetic data for four epochs:
+  CSV/console contained epochs 3 and 4, paired training/validation quality curves
+  rendered, and checkpoints, five-panel visuals and final test exports succeeded.
+- Python/notebook syntax and `git diff --check` passed. No full training was run.
+
+### Smoke/full mode verification (2026-10-10)
+
+- All 13 single-process epoch-training tests passed, including the new three-epoch
+  smoke test for unchanged 200-epoch scheduling and final smoke visuals.
+- Executed the actual notebook cells with the full v1 architecture and synthetic
+  images: smoke stopped at epoch 3, exported epoch-3 visuals and skipped official
+  test loading. Switching modes without setup was rejected; re-running full setup
+  reproduced the initial model weights with an empty optimizer and a separate folder.
+- A shortened four-epoch full-mode check completed training, plots and test export
+  without modifying the smoke checkpoint. Syntax and diff whitespace checks passed.
+  This follow-up used CPU only; no real-data/full 200-epoch or GPU run was performed.

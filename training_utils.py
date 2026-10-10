@@ -19,8 +19,9 @@ from analysis_utils import image_metrics, infer_full_image, tensor_to_uint8
 
 
 CHECKPOINT_FORMAT = "retinexformer-epoch-v1"
-METRIC_FIELDS = ("epoch", "global_step", "train_loss", "val_loss", "val_psnr",
-                 "val_ssim", "lr", "epoch_seconds", "elapsed_seconds", "is_best")
+METRIC_FIELDS = ("epoch", "global_step", "train_loss", "val_loss", "train_psnr",
+                 "val_psnr", "train_ssim", "val_ssim", "lr", "epoch_seconds",
+                 "elapsed_seconds", "is_best")
 
 
 def _canonical(value):
@@ -213,12 +214,20 @@ def restore_rng(state, generators):
         generator.set_state(state["generators"][key].cpu())
 
 
-def write_history(path, history):
+def should_log_epoch(epoch, log_every, num_epochs):
+    if not isinstance(log_every, int) or isinstance(log_every, bool) or log_every < 1:
+        raise ValueError("log_every must be a positive integer")
+    return epoch % log_every == 0 or epoch == num_epochs
+
+
+def write_history(path, history, log_every=1, num_epochs=None):
+    should_log_epoch(1, log_every, num_epochs)
     def write(temporary):
         with temporary.open("w", newline="") as file:
             writer = csv.DictWriter(file, fieldnames=METRIC_FIELDS)
             writer.writeheader()
-            writer.writerows(history)
+            writer.writerows(row for row in history
+                             if should_log_epoch(row["epoch"], log_every, num_epochs))
     _atomic_write(path, write)
 
 
@@ -240,25 +249,43 @@ def load_epoch_checkpoint(path, config, split):
     return checkpoint
 
 
-def train_one_epoch(model, loader, optimizer, scaler, device, use_amp=False):
+def train_one_epoch(model, loader, optimizer, scaler, device, use_amp=False,
+                    return_metrics=False):
+    """Optionally score each training crop's pre-update output, without another forward.
+
+    PSNR/SSIM use the same clamped, rounded 8-bit convention as validation.
+    These are online training-mode metrics, not a final-model evaluation pass.
+    """
     model.train()
     total, samples, steps = 0.0, 0, 0
+    psnr_total, ssim_total = 0.0, 0.0
     for batch in loader:
         low, high = batch["low"].to(device), batch["high"].to(device)
+        if return_metrics and min(low.shape[-2:]) < 11:
+            raise ValueError("Training PSNR/SSIM requires crops at least 11 pixels wide and high")
         optimizer.zero_grad(set_to_none=True)
         with torch.autocast(device_type=torch.device(device).type, enabled=use_amp):
-            loss = F.l1_loss(model(low), high)
+            prediction = model(low)
+            loss = F.l1_loss(prediction, high)
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite training loss; epoch was not checkpointed")
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
+        if return_metrics:
+            for output, gt in zip(prediction.detach().float(), high.detach().float()):
+                psnr, ssim = image_metrics(tensor_to_uint8(output), tensor_to_uint8(gt))
+                psnr_total += psnr
+                ssim_total += ssim
         size = low.shape[0]
         total += float(loss.detach()) * size
         samples += size
         steps += 1
     if samples == 0:
         raise ValueError("Empty training loader")
+    if return_metrics:
+        return {"train_loss": total / samples, "train_psnr": psnr_total / samples,
+                "train_ssim": ssim_total / samples}, steps
     return total / samples, steps
 
 
@@ -325,10 +352,11 @@ def save_epoch_visuals(model, dataset, indices, device, directory):
 
 def run_epoch_training(model, train_loader, val_loader, optimizer, scheduler, scaler,
                        device, config, split, root, generators, resume_from=None,
-                       stop_after_epoch=None, visualize=True):
+                       stop_after_epoch=None, visualize=True, log_every=1):
     """Train complete epochs; optional stop_after_epoch supports short smoke runs."""
     root = Path(root)
     config = _canonical(config)
+    should_log_epoch(1, log_every, config["num_epochs"])
     history, global_step, start_epoch = [], 0, 1
     best = {"psnr": -float("inf"), "ssim": None, "epoch": 0}
     metrics_path = root / "logs" / "training_metrics.csv"
@@ -347,7 +375,7 @@ def run_epoch_training(model, train_loader, val_loader, optimizer, scheduler, sc
     elif (root / "checkpoints" / "last.pth").exists() or metrics_path.exists():
         raise FileExistsError("Training already started; resume last.pth instead of overwriting")
     # The committed checkpoint history is authoritative, even if a crash left CSV ahead.
-    write_history(metrics_path, history)
+    write_history(metrics_path, history, log_every, config["num_epochs"])
     final_epoch = config["num_epochs"] if stop_after_epoch is None else stop_after_epoch
     if not 1 <= final_epoch <= config["num_epochs"]:
         raise ValueError("stop_after_epoch must be within the configured schedule")
@@ -357,34 +385,37 @@ def run_epoch_training(model, train_loader, val_loader, optimizer, scheduler, sc
     for epoch in range(start_epoch, final_epoch + 1):
         started = time.perf_counter()
         lr = scheduler.set_epoch(epoch)
-        train_loss, steps = train_one_epoch(model, train_loader, optimizer, scaler,
-                                           device, config["use_amp"])
+        train_metrics, steps = train_one_epoch(model, train_loader, optimizer, scaler,
+                                              device, config["use_amp"], return_metrics=True)
         global_step += steps
         metrics = validate_epoch(model, val_loader, device)
         improved = metrics["val_psnr"] > best["psnr"]
         if improved:
             best = {"psnr": metrics["val_psnr"], "ssim": metrics["val_ssim"], "epoch": epoch}
         if visualize and (epoch == 1 or epoch % config["vis_every"] == 0
-                          or epoch == config["num_epochs"]):
+                          or epoch == final_epoch):
             save_epoch_visuals(model, val_loader.dataset, indices, device,
                                root / "visuals" / f"epoch_{epoch:04d}")
         seconds = time.perf_counter() - started
         elapsed += seconds
-        history.append(dict(epoch=epoch, global_step=global_step, train_loss=train_loss,
+        history.append(dict(epoch=epoch, global_step=global_step, **train_metrics,
                             **metrics, lr=lr, epoch_seconds=seconds,
                             elapsed_seconds=elapsed, is_best=improved))
         checkpoint = {"format": CHECKPOINT_FORMAT, "model": model.state_dict(),
                       "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
                       "scaler": scaler.state_dict(), "completed_epoch": epoch,
                       "global_step": global_step, "best": best, "config": config,
-                      "split": split, "history": history, "rng": capture_rng(generators)}
+                      "split": split, "history": history, "rng": capture_rng(generators),
+                      "log_every": log_every}
         # Write best before last; if interrupted, replaying this epoch restores consistency.
         if improved:
             _atomic_write(root / "checkpoints" / "best.pth", lambda p: torch.save(checkpoint, p))
         _atomic_write(root / "checkpoints" / "last.pth", lambda p: torch.save(checkpoint, p))
-        write_history(metrics_path, history)
-        print(f"Epoch {epoch:03d}/{config['num_epochs']} | step {global_step} | "
-              f"LR {lr:.8g} | train L1 {train_loss:.6f} | val L1 {metrics['val_loss']:.6f} | "
-              f"PSNR {metrics['val_psnr']:.4f} | SSIM {metrics['val_ssim']:.4f} | "
-              f"{seconds:.1f}s" + (" | BEST" if improved else ""))
+        if should_log_epoch(epoch, log_every, config["num_epochs"]):
+            write_history(metrics_path, history, log_every, config["num_epochs"])
+            print(f"Epoch {epoch:03d}/{config['num_epochs']} | step {global_step} | "
+                  f"LR {lr:.8g} | train L1 {train_metrics['train_loss']:.6f} | val L1 {metrics['val_loss']:.6f} | "
+                  f"train PSNR {train_metrics['train_psnr']:.4f} | val PSNR {metrics['val_psnr']:.4f} | "
+                  f"train SSIM {train_metrics['train_ssim']:.4f} | val SSIM {metrics['val_ssim']:.4f} | "
+                  f"{seconds:.1f}s" + (" | BEST" if improved else ""))
     return history

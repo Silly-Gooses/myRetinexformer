@@ -1,6 +1,8 @@
 """Epoch schedule, split isolation, checkpoint recovery and reproducible resume."""
 
 import csv
+import contextlib
+import io
 import json
 from pathlib import Path
 import random
@@ -14,11 +16,12 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from RetinexFormer_arch import RetinexFormer
+from analysis_utils import image_metrics, tensor_to_uint8
 from training_utils import (
     EpochWarmupCosine, _atomic_write, build_epoch_loaders, epoch_learning_rate,
     load_epoch_checkpoint, make_split, prepare_experiment, run_epoch_training,
     save_epoch_visuals, seed_everything, seed_worker, train_one_epoch,
-    validate_epoch, validate_split,
+    validate_epoch, validate_split, should_log_epoch,
 )
 
 
@@ -233,6 +236,70 @@ class EpochTrainingTests(unittest.TestCase):
             self.assertEqual(path.read_bytes(), b'previous')
             self.assertEqual(list(Path(temp).glob('*.tmp')), [])
 
+    def test_three_epoch_logging_preserves_best_and_resume(self):
+        cfg = dict(config(), num_epochs=7)
+        names = [str(i) for i in range(10)]
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'run'
+            split = prepare_experiment(root, cfg, names)
+            seed_everything(42)
+            parts = components(cfg)
+            metrics = [dict(val_loss=0.2, val_psnr=p, val_ssim=0.5)
+                       for p in (10, 11, 12, 13, 12, 11, 10)]
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), patch('training_utils.validate_epoch', side_effect=metrics[:5]):
+                train(parts, cfg, root, split, stop_after_epoch=5, log_every=3)
+            last = root / 'checkpoints/last.pth'
+            self.assertEqual(load_epoch_checkpoint(last, cfg, split)['completed_epoch'], 5)
+            self.assertEqual(load_epoch_checkpoint(root/'checkpoints/best.pth', cfg, split)['completed_epoch'], 4)
+            self.assertIn('Epoch 003/7', output.getvalue())
+            self.assertNotIn('Epoch 004/7', output.getvalue())
+            with (root/'logs/training_metrics.csv').open() as file:
+                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['3'])
+            resumed = components(cfg)
+            with contextlib.redirect_stdout(output), patch('training_utils.validate_epoch', side_effect=metrics[5:]):
+                history = train(resumed, cfg, root, split, resume_from=last, log_every=3)
+            self.assertEqual(len(history), 7)
+            with (root/'logs/training_metrics.csv').open() as file:
+                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['3', '6', '7'])
+            self.assertIn('Epoch 006/7', output.getvalue())
+            self.assertIn('Epoch 007/7', output.getvalue())
+            # Changing only report frequency is compatible with an existing checkpoint.
+            train(components(cfg), cfg, root, split, resume_from=last, log_every=1)
+            with (root/'logs/training_metrics.csv').open() as file:
+                self.assertEqual(len(list(csv.DictReader(file))), 7)
+
+    def test_log_interval_validation_and_final_epoch(self):
+        epochs = [e for e in range(1, 201) if should_log_epoch(e, 3, 200)]
+        self.assertEqual(len(epochs), 67)
+        self.assertEqual(epochs[-2:], [198, 200])
+        for value in (0, -1, 1.5, True):
+            with self.assertRaises(ValueError):
+                should_log_epoch(1, value, 200)
+
+    def test_three_epoch_smoke_keeps_schedule_and_saves_final_visuals(self):
+        cfg = dict(config(), num_epochs=200, warmup_epochs=3)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'smoke'
+            split = prepare_experiment(root, cfg, [str(i) for i in range(10)])
+            seed_everything(42)
+            model, train_loader, val_loader, optimizer, scheduler, scaler, generators = components(cfg)
+            with patch('training_utils.save_epoch_visuals') as save_visuals:
+                history = run_epoch_training(
+                    model, train_loader, val_loader, optimizer, scheduler, scaler,
+                    'cpu', cfg, split, root, generators, stop_after_epoch=3, log_every=3)
+            self.assertEqual([call.args[-1].name for call in save_visuals.call_args_list],
+                             ['epoch_0001', 'epoch_0003'])
+            self.assertEqual(len(history), 3)
+            for row, expected in zip(history, [1e-6, 5.05e-5, 1e-4]):
+                self.assertAlmostEqual(row['lr'], expected)
+            last = load_epoch_checkpoint(root/'checkpoints/last.pth', cfg, split)
+            self.assertEqual(last['completed_epoch'], 3)
+            self.assertEqual(last['config']['num_epochs'], 200)
+            self.assertEqual(last['scheduler']['schedule']['num_epochs'], 200)
+            with (root/'logs/training_metrics.csv').open() as file:
+                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['3'])
+
     def test_sample_weighted_training_loss(self):
         model = torch.nn.Conv2d(3, 3, 1, bias=False)
         torch.nn.init.zeros_(model.weight)
@@ -243,6 +310,57 @@ class EpochTrainingTests(unittest.TestCase):
                                      torch.amp.GradScaler('cuda', enabled=False), 'cpu')
         self.assertEqual(loss, 2.)
         self.assertEqual(steps, 2)
+
+    def test_training_quality_matches_per_image_metrics(self):
+        model = torch.nn.Conv2d(3, 3, 1, bias=False)
+        torch.nn.init.zeros_(model.weight)
+        optimizer = torch.optim.SGD(model.parameters(), lr=0)
+        targets = [torch.full((3, 12, 12), value) for value in (0.1, 0.3, 0.8)]
+        batches = [dict(low=torch.zeros(2, 3, 12, 12), high=torch.stack(targets[:2])),
+                   dict(low=torch.zeros(1, 3, 12, 12), high=torch.stack(targets[2:]))]
+        expected = [image_metrics(tensor_to_uint8(torch.zeros_like(gt)), tensor_to_uint8(gt))
+                    for gt in targets]
+        metrics, steps = train_one_epoch(model, batches, optimizer,
+            torch.amp.GradScaler('cuda', enabled=False), 'cpu', return_metrics=True)
+        self.assertEqual(steps, 2)
+        self.assertAlmostEqual(metrics['train_loss'], 0.4, places=6)
+        self.assertAlmostEqual(metrics['train_psnr'], float(np.mean([v[0] for v in expected])))
+        self.assertAlmostEqual(metrics['train_ssim'], float(np.mean([v[1] for v in expected])))
+
+    def test_quality_logging_does_not_change_training(self):
+        cfg = config()
+        results = []
+        for collect in (False, True):
+            seed_everything(42)
+            model, loader, _, optimizer, _, scaler, _ = components(cfg)
+            result, steps = train_one_epoch(model, loader, optimizer, scaler, 'cpu',
+                                            use_amp=True, return_metrics=collect)
+            results.append((model.state_dict(), optimizer.state_dict(), result, steps))
+        self.assert_nested_equal(results[0][0], results[1][0])
+        self.assert_nested_equal(results[0][1], results[1][1])
+        self.assertEqual(results[0][2], results[1][2]['train_loss'])
+        self.assertTrue(np.isfinite(results[1][2]['train_ssim']))
+        self.assertEqual(results[0][3], results[1][3])
+
+    def test_resume_legacy_history_leaves_unknown_quality_blank(self):
+        cfg = config()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)/'run'
+            split = prepare_experiment(root, cfg, [str(i) for i in range(10)])
+            seed_everything(42)
+            train(components(cfg), cfg, root, split, stop_after_epoch=1)
+            last = root/'checkpoints/last.pth'
+            checkpoint = torch.load(last, weights_only=True)
+            for row in checkpoint['history']:
+                row.pop('train_psnr')
+                row.pop('train_ssim')
+            torch.save(checkpoint, last)
+            train(components(cfg), cfg, root, split, resume_from=last, log_every=1)
+            with (root/'logs/training_metrics.csv').open() as file:
+                rows = list(csv.DictReader(file))
+            self.assertEqual(rows[0]['train_psnr'], '')
+            self.assertEqual(rows[0]['train_ssim'], '')
+            self.assertTrue(all(row['train_psnr'] and row['train_ssim'] for row in rows[1:]))
 
     def test_v1_validation_and_five_panel_visuals(self):
         seed_everything(42)
