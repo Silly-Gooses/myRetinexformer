@@ -17,8 +17,8 @@ when using Run all.
 
 - Smoke runs three complete epochs using the unchanged 200-epoch schedule, so
   all three are warm-up epochs. It saves under `<EXPERIMENT_NAME>_Smoke3`, with
-  best/last checkpoints, an epoch-3 CSV row, curves and validation visuals at
-  epochs 1 and 3. The curves mark individual points so the single CSV row is visible.
+  best/last checkpoints, CSV rows at epochs 0 and 3, curves and validation visuals at
+  epochs 0, 1 and 3. The curves mark individual points so the single CSV row is visible.
 - Full runs all configured epochs under the original `<EXPERIMENT_NAME>` folder.
   After inspecting smoke results, set `RUN_MODE="full"`, `RESUME_FROM=None`, and
   re-run configuration, then the full training cell. Each `train.py` invocation
@@ -76,6 +76,32 @@ existing notebook epoch checkpoints can resume. Dataset, architecture, batch siz
 and schedule mismatches are still rejected. Optional correctness tests and GPU
 benchmarks are opt-in in the notebook. Colab's Git setup requires this script and
 updated notebook to be available on remote branch `v1`; no commit/push is automatic.
+
+## Epoch 0: initial validation
+
+Fresh smoke/full runs evaluate all validation images before any training update.
+The existing full-image padding, floating-point L1 and saved-8-bit PSNR/SSIM
+implementations are used in evaluation/inference mode. Epoch 0 always appears in
+CSV and console, regardless of `LOG_EVERY`. `global_step=0`, `is_best=False`;
+training loss/PSNR/SSIM and LR are `None` (blank CSV, N/A console, gaps in curves).
+Epoch-0 timing includes validation/visualization and contributes to elapsed time.
+
+With visualization enabled, the fixed validation samples also produce five-panel
+images in `visuals/epoch_0000/`. RNG and loader-generator states are restored after
+initial diagnostics, so training data order and augmentation do not change.
+
+After successful initial validation, `last.pth` is atomically saved with
+`completed_epoch=0` and scheduler epoch 0. Resume starts epoch 1 without repeating
+initial evaluation. No `best.pth` is created at epoch 0: only trained epochs
+participate in best selection, even if their PSNR is below the initial score.
+The scheduler stays at its initial state until epoch 1 sets the warm-up LR.
+
+Fresh checkpoints retain history `0..completed_epoch`; older checkpoints with
+history `1..completed_epoch` still load without backfilling initial metrics.
+Configuration schema and checkpoint format identifier are unchanged. New
+checkpoints require the updated loader; older code may reject epoch-0 history.
+The 200 training epochs and three warm-up epochs remain unchanged. Final test
+evaluation still requires completion of the full schedule and uses `best.pth`.
 
 ## Schedule
 
@@ -163,7 +189,7 @@ Checkpoints use tensors and primitive types and load with `weights_only=True`.
 ## Outputs and checks
 
 Validation and checkpoint updates still run every epoch. The notebook uses
-`LOG_EVERY=3` for CSV/console output: epochs 3, 6, ..., 198, and 200 (67 rows).
+`LOG_EVERY=3` for CSV/console output: epochs 0, 3, 6, ..., 198, and 200 (68 rows for fresh runs).
 Each row reports that epoch, not an average of the preceding three epochs.
 Checkpoint history retains every epoch for resume. `LOG_EVERY` is a presentation
 setting, outside the strict training configuration, so existing checkpoints can
@@ -173,7 +199,7 @@ for compatibility; the notebook passes its explicit setting.
 Reported fields are train/validation L1, train/validation PSNR and SSIM, LR actually used,
 global step, epoch/cumulative processing time, and best flag. Times include
 validation/visual generation but exclude checkpoint I/O and disconnected time.
-Fixed validation examples are saved at epoch 1, every 10 epochs, and the last
+Fixed validation examples are saved at epochs 0 and 1, every 10 epochs, and the last
 epoch of the selected run (including an early smoke stop): Low / Edge / Lit-up / Output / GT, both individual PNGs and a five-panel
 grid. The curve cell plots loss, validation metrics and LR. Final test evaluation
 loads `best.pth`, exports all test images and per-image/average metrics.
@@ -263,3 +289,16 @@ checkpoint history keeps all epoch metrics for recovery.
   Separate folders, final smoke visuals and subprocess error propagation passed.
 - Default CONFIG matches the previous notebook exactly. Python/notebook syntax
   and `git diff --check` passed. No Colab GPU or real-data 200-epoch run was made.
+
+### Epoch-0 verification (2026-10-12)
+
+- Full suite: 36 tests run, 34 passed, two CUDA tests skipped (CUDA unavailable).
+- Initial checkpoint preserves model/optimizer/RNG/generator state; resume from
+  epoch 0 matches uninterrupted training without repeating initial validation.
+  Initial PSNR is excluded from best selection even when higher than trained scores.
+- Legacy histories still resume without backfilling epoch 0. Inconsistent steps,
+  scheduler state and empty history are rejected. Worker resume checks passed.
+- Actual notebook/CLI smoke and shortened full runs on synthetic CPU data produced
+  epoch-0 visuals, CSV rows 0/3 (smoke) and 0/3/4 (full check), valid curves with
+  blank training/LR values, and final test exports. Syntax/whitespace checks passed.
+  No real-data full training, commit or push was performed for this update.

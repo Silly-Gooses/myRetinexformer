@@ -93,7 +93,12 @@ class EpochWarmupCosine:
     def load_state_dict(self, state):
         if state["schedule"] != self.schedule:
             raise ValueError("Resume scheduler settings differ from this run")
-        self.set_epoch(state["epoch"])
+        if state["epoch"] == 0:
+            self.epoch = 0
+            for group in self.optimizer.param_groups:
+                group["lr"] = self.schedule["warmup_start_lr"]
+        else:
+            self.set_epoch(state["epoch"])
 
 
 def make_split(filenames, seed=42, val_fraction=0.1):
@@ -217,7 +222,7 @@ def restore_rng(state, generators):
 def should_log_epoch(epoch, log_every, num_epochs):
     if not isinstance(log_every, int) or isinstance(log_every, bool) or log_every < 1:
         raise ValueError("log_every must be a positive integer")
-    return epoch % log_every == 0 or epoch == num_epochs
+    return epoch == 0 or epoch % log_every == 0 or epoch == num_epochs
 
 
 def write_history(path, history, log_every=1, num_epochs=None):
@@ -241,9 +246,15 @@ def load_epoch_checkpoint(path, config, split):
         raise ValueError("Resume checkpoint split differs")
     epoch = checkpoint["completed_epoch"]
     history = checkpoint["history"]
-    if (not 1 <= epoch <= config["num_epochs"] or len(history) != epoch
-            or [row["epoch"] for row in history] != list(range(1, epoch + 1))
-            or history[-1]["global_step"] != checkpoint["global_step"]
+    epochs = [row["epoch"] for row in history]
+    steps = [row["global_step"] for row in history]
+    if (type(epoch) is not int or not 0 <= epoch <= config["num_epochs"] or not history
+            or epochs not in (list(range(epoch + 1)), list(range(1, epoch + 1)))
+            or any(type(step) is not int or step < 0 for step in steps)
+            or any(a >= b for a, b in zip(steps, steps[1:]))
+            or (epochs[0] == 0 and steps[0] != 0)
+            or (epochs[0] == 1 and steps[0] == 0)
+            or steps[-1] != checkpoint["global_step"]
             or checkpoint["scheduler"]["epoch"] != epoch):
         raise ValueError("Inconsistent completed epoch, scheduler, or metric history")
     return checkpoint
@@ -374,14 +385,47 @@ def run_epoch_training(model, train_loader, val_loader, optimizer, scheduler, sc
         restore_rng(checkpoint["rng"], generators)
     elif (root / "checkpoints" / "last.pth").exists() or metrics_path.exists():
         raise FileExistsError("Training already started; resume last.pth instead of overwriting")
-    # The committed checkpoint history is authoritative, even if a crash left CSV ahead.
-    write_history(metrics_path, history, log_every, config["num_epochs"])
     final_epoch = config["num_epochs"] if stop_after_epoch is None else stop_after_epoch
     if not 1 <= final_epoch <= config["num_epochs"]:
         raise ValueError("stop_after_epoch must be within the configured schedule")
     indices = np.linspace(0, len(val_loader.dataset) - 1,
                           min(config["fixed_vis_count"], len(val_loader.dataset)), dtype=int).tolist()
     elapsed = history[-1]["elapsed_seconds"] if history else 0.0
+
+    def save_checkpoint(epoch, improved=False):
+        checkpoint = {"format": CHECKPOINT_FORMAT, "model": model.state_dict(),
+                      "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
+                      "scaler": scaler.state_dict(), "completed_epoch": epoch,
+                      "global_step": global_step, "best": best, "config": config,
+                      "split": split, "history": history, "rng": capture_rng(generators),
+                      "log_every": log_every}
+        # Best first: replaying an interrupted epoch restores consistency.
+        if improved:
+            _atomic_write(root / "checkpoints" / "best.pth", lambda p: torch.save(checkpoint, p))
+        _atomic_write(root / "checkpoints" / "last.pth", lambda p: torch.save(checkpoint, p))
+
+    if resume_from is None:
+        started = time.perf_counter()
+        rng = capture_rng(generators)
+        try:
+            metrics = validate_epoch(model, val_loader, device)
+            if visualize:
+                save_epoch_visuals(model, val_loader.dataset, indices, device,
+                                   root / "visuals" / "epoch_0000")
+        finally:
+            # Validation workers and diagnostic datasets must not advance training RNG.
+            restore_rng(rng, generators)
+        elapsed = time.perf_counter() - started
+        history.append(dict(epoch=0, global_step=0, train_loss=None, train_psnr=None,
+                            train_ssim=None, **metrics, lr=None, epoch_seconds=elapsed,
+                            elapsed_seconds=elapsed, is_best=False))
+        save_checkpoint(0)
+        print(f"Epoch 000/{config['num_epochs']} | INITIAL VALIDATION | step 0 | "
+              f"LR N/A | train L1 N/A | val L1 {metrics['val_loss']:.6f} | "
+              f"train PSNR N/A | val PSNR {metrics['val_psnr']:.4f} | "
+              f"train SSIM N/A | val SSIM {metrics['val_ssim']:.4f} | {elapsed:.1f}s")
+    # A committed checkpoint is authoritative, including epoch 0 on resume.
+    write_history(metrics_path, history, log_every, config["num_epochs"])
     for epoch in range(start_epoch, final_epoch + 1):
         started = time.perf_counter()
         lr = scheduler.set_epoch(epoch)
@@ -401,16 +445,7 @@ def run_epoch_training(model, train_loader, val_loader, optimizer, scheduler, sc
         history.append(dict(epoch=epoch, global_step=global_step, **train_metrics,
                             **metrics, lr=lr, epoch_seconds=seconds,
                             elapsed_seconds=elapsed, is_best=improved))
-        checkpoint = {"format": CHECKPOINT_FORMAT, "model": model.state_dict(),
-                      "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
-                      "scaler": scaler.state_dict(), "completed_epoch": epoch,
-                      "global_step": global_step, "best": best, "config": config,
-                      "split": split, "history": history, "rng": capture_rng(generators),
-                      "log_every": log_every}
-        # Write best before last; if interrupted, replaying this epoch restores consistency.
-        if improved:
-            _atomic_write(root / "checkpoints" / "best.pth", lambda p: torch.save(checkpoint, p))
-        _atomic_write(root / "checkpoints" / "last.pth", lambda p: torch.save(checkpoint, p))
+        save_checkpoint(epoch, improved)
         if should_log_epoch(epoch, log_every, config["num_epochs"]):
             write_history(metrics_path, history, log_every, config["num_epochs"])
             print(f"Epoch {epoch:03d}/{config['num_epochs']} | step {global_step} | "

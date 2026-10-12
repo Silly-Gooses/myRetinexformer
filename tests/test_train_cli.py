@@ -97,13 +97,15 @@ class TrainCLITests(unittest.TestCase):
             cp = torch.load(experiment/'checkpoints/last.pth', weights_only=True)
             self.assertEqual(cp['completed_epoch'], 3)
             self.assertEqual(cp['config']['num_epochs'], 200)
-            self.assertEqual(len(cp['history']), 3)
-            for row, expected in zip(cp['history'], [1e-6, 5.05e-5, 1e-4]):
+            self.assertEqual(len(cp['history']), 4)
+            for row, expected in zip(cp['history'][1:], [1e-6, 5.05e-5, 1e-4]):
                 self.assertAlmostEqual(row['lr'], expected)
             with (experiment/'logs/training_metrics.csv').open() as file:
                 rows = list(csv.DictReader(file))
-            self.assertEqual([r['epoch'] for r in rows], ['3'])
-            self.assertTrue(rows[0]['train_psnr'] and rows[0]['train_ssim'])
+            self.assertEqual([r['epoch'] for r in rows], ['0', '3'])
+            self.assertEqual(rows[0]['train_psnr'], '')
+            self.assertTrue(rows[1]['train_psnr'] and rows[1]['train_ssim'])
+            self.assertEqual(len(list((experiment/'visuals/epoch_0000/edge').glob('*.png'))), 2)
             for label in ('low', 'edge', 'lit_up', 'output', 'gt'):
                 self.assertEqual(len(list((experiment/'visuals/epoch_0003'/label).glob('*.png'))), 2)
             self.assertFalse((experiment/'final_test_outputs').exists())
@@ -141,6 +143,9 @@ class TrainCLITests(unittest.TestCase):
                     torch.amp.GradScaler('cuda', enabled=False), torch.device('cpu'), cfg,
                     split, resumed_root, loaders[2], stop_after_epoch=1, log_every=3)
             last = resumed_root/'checkpoints/last.pth'
+            legacy = torch.load(last, weights_only=True)
+            legacy['history'] = legacy['history'][1:]
+            torch.save(legacy, last)
             before = last.read_bytes()
             rejected = self.invoke(config_file, root, 'resumed', '--mode', 'full', '--evaluate-only', success=False)
             self.assertIn('Complete the configured training run', rejected.stderr)
@@ -156,7 +161,7 @@ class TrainCLITests(unittest.TestCase):
             complete = torch.load(root/'uninterrupted/checkpoints/last.pth', weights_only=True)
             for key in ('model', 'optimizer', 'scheduler', 'scaler', 'rng', 'split', 'best', 'global_step'):
                 self.assert_nested_equal(resumed[key], complete[key])
-            for a, b in zip(resumed['history'], complete['history']):
+            for a, b in zip(resumed['history'], complete['history'][1:]):
                 self.assertEqual({k:v for k,v in a.items() if 'seconds' not in k},
                                  {k:v for k,v in b.items() if 'seconds' not in k})
             with (resumed_root/'logs/training_metrics.csv').open() as file:

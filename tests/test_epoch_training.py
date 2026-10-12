@@ -1,6 +1,7 @@
 """Epoch schedule, split isolation, checkpoint recovery and reproducible resume."""
 
 import csv
+import copy
 import contextlib
 import io
 import json
@@ -21,7 +22,7 @@ from training_utils import (
     EpochWarmupCosine, _atomic_write, build_epoch_loaders, epoch_learning_rate,
     load_epoch_checkpoint, make_split, prepare_experiment, run_epoch_training,
     save_epoch_visuals, seed_everything, seed_worker, train_one_epoch,
-    validate_epoch, validate_split, should_log_epoch,
+    validate_epoch, validate_split, should_log_epoch, capture_rng,
 )
 
 
@@ -183,7 +184,7 @@ class EpochTrainingTests(unittest.TestCase):
             self.assertIn('rng', cp)
             with (resumed/'logs/training_metrics.csv').open() as file:
                 rows = list(csv.DictReader(file))
-            self.assertEqual([row['epoch'] for row in rows], ['1', '2', '3', '4'])
+            self.assertEqual([row['epoch'] for row in rows], ['0', '1', '2', '3', '4'])
 
     def test_resume_equivalence_single_process(self):
         self._resume_equivalence(0)
@@ -200,7 +201,7 @@ class EpochTrainingTests(unittest.TestCase):
             seed_everything(42)
             parts = components(cfg)
             metrics = [dict(val_loss=0.2, val_psnr=psnr, val_ssim=0.5)
-                       for psnr in (9, 11, 11, 10)]
+                       for psnr in (99, 9, 11, 11, 10)]
             with patch('training_utils.validate_epoch', side_effect=metrics):
                 train(parts, cfg, root, split)
             best = load_epoch_checkpoint(root/'checkpoints/best.pth', cfg, split)
@@ -247,7 +248,7 @@ class EpochTrainingTests(unittest.TestCase):
             metrics = [dict(val_loss=0.2, val_psnr=p, val_ssim=0.5)
                        for p in (10, 11, 12, 13, 12, 11, 10)]
             output = io.StringIO()
-            with contextlib.redirect_stdout(output), patch('training_utils.validate_epoch', side_effect=metrics[:5]):
+            with contextlib.redirect_stdout(output), patch('training_utils.validate_epoch', side_effect=[dict(val_loss=0.2, val_psnr=99, val_ssim=0.5)] + metrics[:5]):
                 train(parts, cfg, root, split, stop_after_epoch=5, log_every=3)
             last = root / 'checkpoints/last.pth'
             self.assertEqual(load_epoch_checkpoint(last, cfg, split)['completed_epoch'], 5)
@@ -255,23 +256,23 @@ class EpochTrainingTests(unittest.TestCase):
             self.assertIn('Epoch 003/7', output.getvalue())
             self.assertNotIn('Epoch 004/7', output.getvalue())
             with (root/'logs/training_metrics.csv').open() as file:
-                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['3'])
+                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['0', '3'])
             resumed = components(cfg)
             with contextlib.redirect_stdout(output), patch('training_utils.validate_epoch', side_effect=metrics[5:]):
                 history = train(resumed, cfg, root, split, resume_from=last, log_every=3)
-            self.assertEqual(len(history), 7)
+            self.assertEqual(len(history), 8)
             with (root/'logs/training_metrics.csv').open() as file:
-                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['3', '6', '7'])
+                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['0', '3', '6', '7'])
             self.assertIn('Epoch 006/7', output.getvalue())
             self.assertIn('Epoch 007/7', output.getvalue())
             # Changing only report frequency is compatible with an existing checkpoint.
             train(components(cfg), cfg, root, split, resume_from=last, log_every=1)
             with (root/'logs/training_metrics.csv').open() as file:
-                self.assertEqual(len(list(csv.DictReader(file))), 7)
+                self.assertEqual(len(list(csv.DictReader(file))), 8)
 
     def test_log_interval_validation_and_final_epoch(self):
-        epochs = [e for e in range(1, 201) if should_log_epoch(e, 3, 200)]
-        self.assertEqual(len(epochs), 67)
+        epochs = [e for e in range(0, 201) if should_log_epoch(e, 3, 200)]
+        self.assertEqual(len(epochs), 68)
         self.assertEqual(epochs[-2:], [198, 200])
         for value in (0, -1, 1.5, True):
             with self.assertRaises(ValueError):
@@ -289,16 +290,16 @@ class EpochTrainingTests(unittest.TestCase):
                     model, train_loader, val_loader, optimizer, scheduler, scaler,
                     'cpu', cfg, split, root, generators, stop_after_epoch=3, log_every=3)
             self.assertEqual([call.args[-1].name for call in save_visuals.call_args_list],
-                             ['epoch_0001', 'epoch_0003'])
-            self.assertEqual(len(history), 3)
-            for row, expected in zip(history, [1e-6, 5.05e-5, 1e-4]):
+                             ['epoch_0000', 'epoch_0001', 'epoch_0003'])
+            self.assertEqual(len(history), 4)
+            for row, expected in zip(history[1:], [1e-6, 5.05e-5, 1e-4]):
                 self.assertAlmostEqual(row['lr'], expected)
             last = load_epoch_checkpoint(root/'checkpoints/last.pth', cfg, split)
             self.assertEqual(last['completed_epoch'], 3)
             self.assertEqual(last['config']['num_epochs'], 200)
             self.assertEqual(last['scheduler']['schedule']['num_epochs'], 200)
             with (root/'logs/training_metrics.csv').open() as file:
-                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['3'])
+                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['0', '3'])
 
     def test_sample_weighted_training_loss(self):
         model = torch.nn.Conv2d(3, 3, 1, bias=False)
@@ -351,6 +352,7 @@ class EpochTrainingTests(unittest.TestCase):
             train(components(cfg), cfg, root, split, stop_after_epoch=1)
             last = root/'checkpoints/last.pth'
             checkpoint = torch.load(last, weights_only=True)
+            checkpoint['history'] = checkpoint['history'][1:]  # Legacy: no epoch 0.
             for row in checkpoint['history']:
                 row.pop('train_psnr')
                 row.pop('train_ssim')
@@ -358,9 +360,90 @@ class EpochTrainingTests(unittest.TestCase):
             train(components(cfg), cfg, root, split, resume_from=last, log_every=1)
             with (root/'logs/training_metrics.csv').open() as file:
                 rows = list(csv.DictReader(file))
+            self.assertEqual([r['epoch'] for r in rows], ['1', '2', '3', '4'])
             self.assertEqual(rows[0]['train_psnr'], '')
             self.assertEqual(rows[0]['train_ssim'], '')
             self.assertTrue(all(row['train_psnr'] and row['train_ssim'] for row in rows[1:]))
+
+    def test_epoch_zero_checkpoint_preserves_state_and_resumes_once(self):
+        cfg = config()
+        with tempfile.TemporaryDirectory() as temp:
+            root, complete = Path(temp)/'resumed', Path(temp)/'complete'
+            split = prepare_experiment(root, cfg, [str(i) for i in range(10)])
+            prepare_experiment(complete, cfg, [str(i) for i in range(10)])
+            seed_everything(42)
+            parts = components(cfg)
+            initial = copy.deepcopy(parts[0].state_dict())
+            optimizer = copy.deepcopy(parts[3].state_dict())
+            rng = capture_rng(parts[-1])
+            def consuming_validation(*args):
+                random.random(); np.random.rand(); torch.rand(3)
+                return validate_epoch(*args)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), patch(
+                    'training_utils.validate_epoch', side_effect=consuming_validation), patch(
+                    'training_utils.train_one_epoch', side_effect=RuntimeError('disconnect')):
+                with self.assertRaisesRegex(RuntimeError, 'disconnect'):
+                    train(parts, cfg, root, split, log_every=3)
+            last = root/'checkpoints/last.pth'
+            cp = load_epoch_checkpoint(last, cfg, split)
+            self.assertEqual(cp['completed_epoch'], 0)
+            self.assertEqual(cp['global_step'], 0)
+            self.assertEqual(cp['scheduler']['epoch'], 0)
+            self.assert_nested_equal(initial, cp['model'])
+            self.assert_nested_equal(optimizer, cp['optimizer'])
+            self.assert_nested_equal(rng, cp['rng'])
+            self.assertFalse((root/'checkpoints/best.pth').exists())
+            self.assertTrue(parts[0].training)
+            row = cp['history'][0]
+            for field in ('train_loss', 'train_psnr', 'train_ssim', 'lr'):
+                self.assertIsNone(row[field])
+            self.assertFalse(row['is_best'])
+            self.assertGreaterEqual(row['epoch_seconds'], 0)
+            self.assertEqual(row['elapsed_seconds'], row['epoch_seconds'])
+            self.assertIn('INITIAL VALIDATION', output.getvalue())
+            self.assertIn('train L1 N/A', output.getvalue())
+            with (root/'logs/training_metrics.csv').open() as file:
+                csv_row = next(csv.DictReader(file))
+            self.assertEqual(csv_row['epoch'], '0')
+            self.assertEqual(csv_row['lr'], '')
+            seed_everything(999)
+            resumed = components(cfg)
+            with patch('training_utils.validate_epoch', wraps=validate_epoch) as validation:
+                resumed_history = train(resumed, cfg, root, split, resume_from=last, log_every=3)
+            self.assertEqual(validation.call_count, cfg['num_epochs'])
+            seed_everything(42)
+            uninterrupted = components(cfg)
+            history = train(uninterrupted, cfg, complete, split, log_every=3)
+            for a, b in zip(history, resumed_history):
+                self.assertEqual({k:v for k,v in a.items() if 'seconds' not in k},
+                                 {k:v for k,v in b.items() if 'seconds' not in k})
+            for index in (0, 3, 4):
+                self.assert_nested_equal(uninterrupted[index].state_dict(), resumed[index].state_dict())
+            self.assert_nested_equal(uninterrupted[0].seen, resumed[0].seen)
+            self.assertEqual(history[1]['lr'], cfg['warmup_start_lr'])
+
+    def test_checkpoint_rejects_invalid_epoch_zero_history(self):
+        cfg = config()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            split = prepare_experiment(root, cfg, [str(i) for i in range(10)])
+            with patch('training_utils.train_one_epoch', side_effect=RuntimeError('stop')):
+                with self.assertRaises(RuntimeError):
+                    train(components(cfg), cfg, root, split)
+            path = root/'checkpoints/last.pth'
+            original = torch.load(path, weights_only=True)
+            for mutation in ('steps', 'scheduler', 'empty'):
+                cp = copy.deepcopy(original)
+                if mutation == 'steps':
+                    cp['history'][0]['global_step'] = cp['global_step'] = 1
+                elif mutation == 'scheduler':
+                    cp['scheduler']['epoch'] = 1
+                else:
+                    cp['history'] = []
+                torch.save(cp, path)
+                with self.assertRaisesRegex(ValueError, 'Inconsistent'):
+                    load_epoch_checkpoint(path, cfg, split)
 
     def test_v1_validation_and_five_panel_visuals(self):
         seed_everything(42)
