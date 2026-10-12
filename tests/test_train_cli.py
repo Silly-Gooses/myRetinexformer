@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import warnings
 
 import numpy as np
 from PIL import Image
@@ -19,7 +20,7 @@ from canny import CannyEdgeDetector
 from RetinexFormer_arch import RetinexFormer
 from training_utils import (EpochWarmupCosine, build_epoch_loaders, prepare_experiment,
                             run_epoch_training, seed_everything)
-from train import main, validate_config
+from train import main, validate_config, training_log
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -110,10 +111,14 @@ class TrainCLITests(unittest.TestCase):
                 self.assertEqual(len(list((experiment/'visuals/epoch_0003'/label).glob('*.png'))), 2)
             self.assertFalse((experiment/'final_test_outputs').exists())
             self.assertFalse((context['OUTPUT_ROOT']/context['EXPERIMENT_NAME']).exists())
+            log_before = (experiment/'logs/training.log').read_text()
+            self.assertIn('INITIAL VALIDATION', log_before)
+            self.assertIn('Epoch 003/200', log_before)
             before = (experiment/'checkpoints/last.pth').read_bytes()
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(subprocess.CalledProcessError):
                 context['launch_run']('smoke')
             self.assertEqual(before, (experiment/'checkpoints/last.pth').read_bytes())
+            self.assertEqual(log_before, (experiment/'logs/training.log').read_text())
             context['RUN_MODE'] = 'full'
             with self.assertRaisesRegex(ValueError, 'configuration'):
                 context['launch_run']('full')
@@ -155,7 +160,11 @@ class TrainCLITests(unittest.TestCase):
             rejected = self.invoke(changed, root, 'resumed', '--mode', 'full', '--resume', success=False)
             self.assertIn('Resume configuration differs', rejected.stderr)
             self.assertEqual(before, last.read_bytes())
+            log = resumed_root/'logs/training.log'
+            log.write_text('Earlier session log\n')
             self.invoke(config_file, root, 'resumed', '--mode', 'full', '--resume')
+            self.assertTrue(log.read_text().startswith('Earlier session log\n'))
+            self.assertIn('full training | resume', log.read_text())
             self.invoke(config_file, root, 'uninterrupted', '--mode', 'full')
             resumed = torch.load(last, weights_only=True)
             complete = torch.load(root/'uninterrupted/checkpoints/last.pth', weights_only=True)
@@ -174,6 +183,38 @@ class TrainCLITests(unittest.TestCase):
                 rows = list(csv.reader(file))
             self.assertEqual(rows[-1][0], 'AVERAGE')
             self.assertEqual(len(list((resumed_root/'final_test_outputs/output').glob('*.png'))), 2)
+
+    def test_console_log_streams_appends_and_records_failures(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            console, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(console), contextlib.redirect_stderr(errors):
+                with training_log(root, 'fresh'):
+                    print('epoch message မြန်မာ')
+                    with warnings.catch_warnings():
+                        warnings.simplefilter('always')
+                        warnings.warn('example warning')
+                    # Writes are visible while the run is still open.
+                    saved = (root/'logs/training.log').read_text()
+                    self.assertIn('epoch message မြန်မာ', saved)
+                    self.assertIn('example warning', saved)
+                before = (root/'logs/training.log').read_text()
+                with self.assertRaisesRegex(RuntimeError, 'training failed'):
+                    with training_log(root, 'resume'):
+                        print('continuing')
+                        raise RuntimeError('training failed')
+                self.assertIs(sys.stdout, console)
+                self.assertIs(sys.stderr, errors)
+                with self.assertRaises(KeyboardInterrupt):
+                    with training_log(root, 'resume'):
+                        raise KeyboardInterrupt()
+            saved = (root/'logs/training.log').read_text()
+            self.assertTrue(saved.startswith(before))
+            self.assertIn('RuntimeError: training failed', saved)
+            self.assertIn('KeyboardInterrupt', saved)
+            self.assertIn('epoch message မြန်မာ', console.getvalue())
+            self.assertIn('example warning', errors.getvalue())
+            self.assertEqual(saved.count('session completed'), 1)
 
     def test_invalid_config_and_smoke_evaluation_are_rejected(self):
         cfg = configuration(Path('/unused'))

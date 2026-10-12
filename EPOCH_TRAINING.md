@@ -156,6 +156,7 @@ RetinexFormer_full_training/Lightweight_RetinexFormer_v1_LOLv2_real_Epoch200/
   checkpoints/best.pth
   checkpoints/last.pth
   logs/training_metrics.csv
+  logs/training.log
   logs/training_curves.png
   visuals/epoch_0001/...
   final_test_outputs/...
@@ -302,3 +303,23 @@ checkpoint history keeps all epoch metrics for recovery.
   epoch-0 visuals, CSV rows 0/3 (smoke) and 0/3/4 (full check), valid curves with
   blank training/LR values, and final test exports. Syntax/whitespace checks passed.
   No real-data full training, commit or push was performed for this update.
+
+## Console transcript
+
+`train.py` mirrors Python stdout/stderr to `logs/training.log` while retaining
+console output in Colab and terminal runs. Writes are flushed promptly. Each fresh,
+resume or final-test evaluation session has a UTC timestamp and label. Resume and
+evaluation append to the same file; they never truncate previous output. The log
+includes training configuration, progress, warnings and session error tracebacks.
+
+Logging begins after experiment/split validation succeeds, preserving fresh-run
+overwrite protection. Earlier argument/configuration/dataset-validation errors
+remain console-only. Native code or child workers writing directly to OS file
+descriptors are not intercepted. A forcibly terminated runtime may not leave an
+error traceback; flush does not guarantee remote Drive synchronization. Metrics
+CSV and checkpoint/resume behavior are unchanged.
+
+Verification (2026-10-12): all four CLI/launcher tests passed on CPU, including
+live log visibility, warnings, failure/interruption tracebacks, append-on-resume,
+overwrite rejection, unchanged checkpoint equivalence and notebook smoke output.
+Python/notebook syntax and diff whitespace checks passed. No GPU/full-data run.

@@ -10,6 +10,10 @@ use a separate _Smoke3 directory and retain the full learning-rate schedule.
 """
 
 import argparse
+from contextlib import contextmanager, redirect_stdout, redirect_stderr
+from datetime import datetime, timezone
+import sys
+import traceback
 import json
 import os
 from pathlib import Path
@@ -33,6 +37,50 @@ from training_utils import (
 
 DEFAULT_EXPERIMENT = "Lightweight_RetinexFormer_v1_LOLv2_real_Epoch200"
 SCHEDULE_KEYS = ("num_epochs", "warmup_epochs", "warmup_start_lr", "peak_lr", "min_lr")
+
+
+class _TeeStream:
+    """Mirror Python text output to the console and a promptly flushed log."""
+    def __init__(self, console, log):
+        self.console, self.log = console, log
+
+    def write(self, text):
+        self.console.write(text)
+        self.log.write(text)
+        self.log.flush()
+        return len(text)
+
+    def flush(self):
+        self.console.flush()
+        self.log.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.console, name)
+
+
+@contextmanager
+def training_log(root, session):
+    """Append after experiment validation, never bypassing fresh-run protection.
+
+    Python stdout/stderr (including warnings) are mirrored live. Tracebacks from
+    failed sessions are saved before restoring streams and propagating the error.
+    Native/worker writes directly to OS file descriptors are not intercepted.
+    """
+    path = Path(root) / "logs" / "training.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", buffering=1) as log:
+        with redirect_stdout(_TeeStream(sys.stdout, log)), redirect_stderr(_TeeStream(sys.stderr, log)):
+            print(f"\n=== {datetime.now(timezone.utc).isoformat()} | {session} ===", flush=True)
+            print("Console log:", path, flush=True)
+            try:
+                yield
+            except BaseException:
+                # The caller/interpreter prints the exception to the restored console.
+                traceback.print_exc(file=log)
+                log.flush()
+                raise
+            else:
+                print(f"=== {datetime.now(timezone.utc).isoformat()} | session completed ===", flush=True)
 
 
 def experiment_directory(output_root, experiment_name, mode):
@@ -125,35 +173,38 @@ def train(config, root, device, *, mode="smoke", resume_from=None, log_every=3):
     low, normal = data / "Train/Low", data / "Train/Normal"
     pairs = find_paired_images(low, normal)
     split = prepare_experiment(root, config, [name for name, _, _ in pairs], resume_from)
-    if resume_from is not None:
-        checkpoint = load_epoch_checkpoint(resume_from, config, split)
-        if mode == "smoke" and checkpoint["completed_epoch"] > 3:
-            raise ValueError("Smoke mode cannot resume a checkpoint beyond epoch 3")
-    train_loader, val_loader, generators = build_epoch_loaders(
-        low, normal, split, batch_size=config["batch_size"], patch_size=config["patch_size"],
-        num_workers=config["num_workers"], seed=config["seed"], pin_memory=(device.type == "cuda"))
-    # Match the notebook's original initialization order and seed.
-    seed_everything(config["seed"])
-    model = build_model(config, device)
-    settings = config["optimizer"]
-    optimizer = torch.optim.Adam(model.parameters(), lr=config["warmup_start_lr"],
-                                 betas=tuple(settings["betas"]), weight_decay=settings["weight_decay"])
-    scheduler = EpochWarmupCosine(optimizer, **{key: config[key] for key in SCHEDULE_KEYS})
-    scaler = torch.amp.GradScaler("cuda", enabled=config["use_amp"])
-    print(f"Mode: {mode} | Device: {device} | Output: {root}", flush=True)
-    print(f"Training pairs: {len(train_loader.dataset)} | Validation pairs: {len(val_loader.dataset)} | "
-          f"Batches per epoch: {len(train_loader)}", flush=True)
-    print("Trainable parameters:", sum(p.numel() for p in model.parameters()), flush=True)
-    print("Resume:", resume_from or "Fresh training", flush=True)
-    history = run_epoch_training(
-        model, train_loader, val_loader, optimizer, scheduler, scaler,
-        device, config, split, root, generators, resume_from=resume_from,
-        stop_after_epoch=3 if mode == "smoke" else None, log_every=log_every)
-    print(f"{mode.capitalize()} training finished at epoch {history[-1]['epoch']}", flush=True)
-    for label, path in (("Best", "checkpoints/best.pth"), ("Last", "checkpoints/last.pth"),
-                        ("CSV", "logs/training_metrics.csv"), ("Visuals", "visuals")):
-        print(f"{label}: {root / path}", flush=True)
-    return history
+    session = f"{mode} training | {'resume' if resume_from is not None else 'fresh'}"
+    with training_log(root, session):
+        print("Training configuration:", json.dumps(config, sort_keys=True), flush=True)
+        if resume_from is not None:
+            checkpoint = load_epoch_checkpoint(resume_from, config, split)
+            if mode == "smoke" and checkpoint["completed_epoch"] > 3:
+                raise ValueError("Smoke mode cannot resume a checkpoint beyond epoch 3")
+        train_loader, val_loader, generators = build_epoch_loaders(
+            low, normal, split, batch_size=config["batch_size"], patch_size=config["patch_size"],
+            num_workers=config["num_workers"], seed=config["seed"], pin_memory=(device.type == "cuda"))
+        # Match the notebook's original initialization order and seed.
+        seed_everything(config["seed"])
+        model = build_model(config, device)
+        settings = config["optimizer"]
+        optimizer = torch.optim.Adam(model.parameters(), lr=config["warmup_start_lr"],
+                                     betas=tuple(settings["betas"]), weight_decay=settings["weight_decay"])
+        scheduler = EpochWarmupCosine(optimizer, **{key: config[key] for key in SCHEDULE_KEYS})
+        scaler = torch.amp.GradScaler("cuda", enabled=config["use_amp"])
+        print(f"Mode: {mode} | Device: {device} | Output: {root}", flush=True)
+        print(f"Training pairs: {len(train_loader.dataset)} | Validation pairs: {len(val_loader.dataset)} | "
+              f"Batches per epoch: {len(train_loader)}", flush=True)
+        print("Trainable parameters:", sum(p.numel() for p in model.parameters()), flush=True)
+        print("Resume:", resume_from or "Fresh training", flush=True)
+        history = run_epoch_training(
+            model, train_loader, val_loader, optimizer, scheduler, scaler,
+            device, config, split, root, generators, resume_from=resume_from,
+            stop_after_epoch=3 if mode == "smoke" else None, log_every=log_every)
+        print(f"{mode.capitalize()} training finished at epoch {history[-1]['epoch']}", flush=True)
+        for label, path in (("Best", "checkpoints/best.pth"), ("Last", "checkpoints/last.pth"),
+                            ("CSV", "logs/training_metrics.csv"), ("Visuals", "visuals")):
+            print(f"{label}: {root / path}", flush=True)
+        return history
 
 
 def evaluate(config, root, device):
@@ -165,20 +216,21 @@ def evaluate(config, root, device):
     if last["completed_epoch"] != config["num_epochs"]:
         raise ValueError("Complete the configured training run before final test evaluation")
     best = load_epoch_checkpoint(root / "checkpoints/best.pth", config, split)
-    model = build_model(config, device)
-    model.load_state_dict(best["model"], strict=True)
-    model.eval()
-    data = Path(config["dataset_root"])
-    low, normal = data / "Test/Low", data / "Test/Normal"
-    find_paired_images(low, normal)
-    dataset = paired_image_Dataset(str(low), str(normal), split="test", crop_size=None, augment=False)
-    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=config["num_workers"])
-    output = root / "final_test_outputs"
-    psnr, ssim = export_test_set(model, loader, device, output)
-    print(f"Test images: {len(dataset)} | Best epoch: {best['best']['epoch']}")
-    print(f"Test PSNR: {psnr:.4f} | SSIM: {ssim:.4f}")
-    print("Outputs and metrics:", output)
-    return psnr, ssim
+    with training_log(root, "final test evaluation"):
+        model = build_model(config, device)
+        model.load_state_dict(best["model"], strict=True)
+        model.eval()
+        data = Path(config["dataset_root"])
+        low, normal = data / "Test/Low", data / "Test/Normal"
+        find_paired_images(low, normal)
+        dataset = paired_image_Dataset(str(low), str(normal), split="test", crop_size=None, augment=False)
+        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=config["num_workers"])
+        output = root / "final_test_outputs"
+        psnr, ssim = export_test_set(model, loader, device, output)
+        print(f"Test images: {len(dataset)} | Best epoch: {best['best']['epoch']}")
+        print(f"Test PSNR: {psnr:.4f} | SSIM: {ssim:.4f}")
+        print("Outputs and metrics:", output)
+        return psnr, ssim
 
 
 def main(argv=None):
