@@ -1,8 +1,10 @@
 # Proposed v1 epoch training
 
 Use the existing `Lightweight_RetinexFormer_Colab_Full_Training_v2.ipynb` on branch
-`v1`. This is now a proposed-model notebook: setup → Drive/configuration → split
-→ fresh model → training → curves/visuals → final test evaluation. The old
+`v1`. This is a proposed-model notebook: setup → Drive/configuration →
+`train.py` launch → curves/visuals → final test evaluation. The script owns split,
+loader, model, optimizer and scheduler setup; `training_utils.py` remains the shared
+implementation for training, validation and checkpoint handling. The old
 iteration training and baseline comparison cells have been removed. Architecture,
 Canny defaults, Adam betas `(0.9, 0.999)`, batch size 8, patch size 256, and L1 loss
 remain unchanged. AMP remains off by default.
@@ -19,8 +21,10 @@ when using Run all.
   epochs 1 and 3. The curves mark individual points so the single CSV row is visible.
 - Full runs all configured epochs under the original `<EXPERIMENT_NAME>` folder.
   After inspecting smoke results, set `RUN_MODE="full"`, `RESUME_FROM=None`, and
-  re-run configuration, split and model setup, then the full training cell. This
-  resets the seed, loaders, model and optimizer for independent training from scratch.
+  re-run configuration, then the full training cell. Each `train.py` invocation
+  starts a new process and resets seed, loaders, model and optimizer for independent
+  training from scratch. The launcher-definition cell only needs re-running after
+  a runtime restart or notebook code update.
 - Resume requires the same mode/folder and `RESUME_FROM=CKPT_DIR / "last.pth"`.
   Fresh runs never overwrite existing folders; change `EXPERIMENT_NAME` for another
   smoke check or independent full experiment. Existing full-run checkpoints retain
@@ -29,6 +33,49 @@ when using Run all.
 Use validation metrics and the saved Low / Edge / Lit-up / Output / GT grids to
 check smoke results. The final official-test cell skips smoke mode. A three-epoch
 warm-up run checks execution and saved artifacts, not final restoration quality.
+
+## train.py entry point and Colab launcher
+
+`train.py` takes the existing training configuration as JSON and exposes:
+
+- `--mode smoke|full` (default smoke); smoke stops at epoch 3 without shortening
+  the saved full schedule. Its experiment directory receives the `_Smoke3` suffix.
+- `--output-root` and `--experiment-name` select the experiment folder.
+- `--resume` uses that run's `checkpoints/last.pth`; `--resume-from PATH` accepts
+  an explicit path to the same checkpoint. These options are mutually exclusive.
+- `--log-every 3` controls reporting without changing strict checkpoint config.
+- `--device auto|cpu|cuda`; AMP still requires CUDA and defaults off in config.
+- `--evaluate-only --mode full` loads the best checkpoint after completed full
+  training and exports official test results without running any training.
+
+For a standalone launch, save the notebook configuration as JSON (or reuse an
+existing run's `config.json` when its settings match):
+
+```python
+Path("run_config.json").write_text(json.dumps(CONFIG, indent=2))
+```
+
+```bash
+python train.py --config run_config.json --output-root experiments --mode smoke
+python train.py --config run_config.json --output-root experiments --mode full
+python train.py --config run_config.json --output-root experiments --mode full --resume
+python train.py --config run_config.json --output-root experiments --mode full --evaluate-only
+```
+
+The notebook performs this handoff automatically using a temporary JSON file and
+an argument list (paths with spaces work). It streams the child process output,
+raises on failure, and terminates the child if the cell is interrupted. Permanent
+configuration and manifests remain inside the experiment directory. Curves and
+saved validation panels are viewed in subsequent notebook cells; no in-memory
+training model is needed. The final evaluation cell invokes the same script in
+`--evaluate-only` mode and skips smoke runs.
+
+The script sets deterministic CUDA configuration before initializing CUDA.
+Configuration schema, experiment paths and checkpoint format are unchanged, so
+existing notebook epoch checkpoints can resume. Dataset, architecture, batch size
+and schedule mismatches are still rejected. Optional correctness tests and GPU
+benchmarks are opt-in in the notebook. Colab's Git setup requires this script and
+updated notebook to be available on remote branch `v1`; no commit/push is automatic.
 
 ## Schedule
 
@@ -95,7 +142,8 @@ A fresh run refuses to overwrite a nonempty experiment directory. Change
 RESUME_FROM = CKPT_DIR / "last.pth"
 ```
 
-Re-run configuration, split, model, and training cells with unchanged settings.
+Re-run configuration and the matching training cell with unchanged settings.
+After a runtime restart, also run the launcher-definition cell.
 Resume restores model, optimizer, scheduler, scaler, completed epoch, global
 step, best PSNR/associated SSIM/epoch, complete metric history, and RNG/generator
 states. It continues at the next epoch and does not restart warm-up. An interrupted
@@ -199,3 +247,19 @@ checkpoint history keeps all epoch metrics for recovery.
 - A shortened four-epoch full-mode check completed training, plots and test export
   without modifying the smoke checkpoint. Syntax and diff whitespace checks passed.
   This follow-up used CPU only; no real-data/full 200-epoch or GPU run was performed.
+
+### train.py entry-point verification (2026-10-10)
+
+- Full regression suite: 34 tests run, 32 passed, two CUDA checks skipped because
+  CUDA is unavailable. Three new tests cover process-level notebook launching,
+  old-helper checkpoint resume, CLI final evaluation, and invalid run requests.
+- A checkpoint created with the former notebook setup resumes through `train.py`
+  with exactly matching model, optimizer, scheduler, RNG state and non-timing
+  history versus uninterrupted training. Changed configuration and premature
+  final evaluation are rejected without replacing checkpoints.
+- Executed the updated notebook launcher, smoke/full cells, plots and final export
+  with the full v1 architecture on synthetic CPU data. Smoke used three epochs of
+  the 200-epoch schedule; the full-mode check used a shortened four-epoch schedule.
+  Separate folders, final smoke visuals and subprocess error propagation passed.
+- Default CONFIG matches the previous notebook exactly. Python/notebook syntax
+  and `git diff --check` passed. No Colab GPU or real-data 200-epoch run was made.

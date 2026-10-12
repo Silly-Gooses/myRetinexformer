@@ -110,7 +110,7 @@ and receive gradients. Baseline conversion preserves initial baseline output to
 floating-point tolerance. Use a fresh optimizer after conversion: baseline
 optimizer states have incompatible embedding dimensions.
 
-The notebook trains from scratch on branch `v1` using 200 epochs, including
+The notebook launches `train.py`, which trains from scratch on branch `v1` using 200 epochs, including
 3 warm-up epochs, in `Lightweight_RetinexFormer_v1_LOLv2_real_Epoch200`.
 It reserves 10% of training pairs for validation and uses the official test set
 only for final evaluation. See [EPOCH_TRAINING.md](EPOCH_TRAINING.md) for configuration,
