@@ -1,4 +1,4 @@
-"""Process-level training entry point, notebook launch, and legacy resume checks."""
+"""Process-level official trainer, independent testing, and Colab launcher."""
 
 import contextlib
 import csv
@@ -25,25 +25,7 @@ from train import main, validate_config, training_log
 REPO = Path(__file__).resolve().parents[1]
 
 
-def dataset(root, subset='Train', count=11):
-    for kind in ('Low', 'Normal'):
-        (root/subset/kind).mkdir(parents=True)
-    rng = np.random.default_rng(4)
-    for index in range(count):
-        low = rng.integers(0, 90, (16, 20, 3), dtype=np.uint8)
-        Image.fromarray(low).save(root/subset/'Low'/f'{index:02d}.png')
-        Image.fromarray(low + 90).save(root/subset/'Normal'/f'{index:02d}.png')
-
-
-def configuration(root):
-    return json.loads(json.dumps(dict(
-        version='v1', training_mode='epoch', seed=42, dataset_root=str(root), val_fraction=0.1,
-        num_epochs=4, warmup_epochs=3, warmup_start_lr=1e-6, peak_lr=1e-4, min_lr=1e-6,
-        batch_size=8, patch_size=16, num_workers=0, use_amp=False, vis_every=10, fixed_vis_count=5,
-        optimizer=dict(name='Adam', betas=[0.9, 0.999], weight_decay=0.), loss='L1',
-        edge_guidance=True, architecture=dict(in_channels=3, out_channels=3, n_feat=8,
-                                             stage=1, num_blocks=[0, 0, 0]),
-        canny=CannyEdgeDetector().config, deterministic=True)))
+from official_fixtures import dataset, configuration
 
 
 class TrainCLITests(unittest.TestCase):
@@ -80,40 +62,35 @@ class TrainCLITests(unittest.TestCase):
         launcher_cell = next(s for s in sources if 'def launch_run(' in s)
         smoke_cell = next(s for s in sources if s.startswith('# @title Smoke training'))
         full_cell = next(s for s in sources if s.startswith('# @title Full training'))
-        evaluation_cell = next(s for s in sources if s.startswith('# Smoke checks never'))
         with tempfile.TemporaryDirectory(prefix='retinex CLI ') as temporary:
             root = Path(temporary)
             data = root/'datasets/LOLv2/Real_captured'
-            dataset(data)
+            dataset(data); dataset(data, 'Test')
             source = config_cell.replace('/content/drive/MyDrive', str(root))
             source = source.replace('PATCH_SIZE = 256', 'PATCH_SIZE = 16').replace('NUM_WORKERS = 2', 'NUM_WORKERS = 0')
+            source = source.replace('"n_feat": 40', '"n_feat": 4').replace('"num_blocks": [1, 2, 2]', '"num_blocks": [0, 0, 0]')
             context = {}
             with contextlib.redirect_stdout(io.StringIO()):
                 exec(compile(source, 'configuration', 'exec'), context)
                 exec(compile(launcher_cell, 'launcher', 'exec'), context)
                 exec(compile(smoke_cell, 'smoke', 'exec'), context)
                 exec(compile(full_cell, 'full_skipped', 'exec'), context)
-                exec(compile(evaluation_cell, 'test_skipped', 'exec'), context)
             experiment = context['FULL_ROOT']
             cp = torch.load(experiment/'checkpoints/last.pth', weights_only=True)
             self.assertEqual(cp['completed_epoch'], 3)
+            self.assertEqual(cp['global_step'], 261)
             self.assertEqual(cp['config']['num_epochs'], 200)
-            self.assertEqual(len(cp['history']), 4)
+            self.assertEqual(len(cp['manifest']['splits']['train']), 689)
             for row, expected in zip(cp['history'][1:], [1e-6, 5.05e-5, 1e-4]):
                 self.assertAlmostEqual(row['lr'], expected)
-            with (experiment/'logs/training_metrics.csv').open() as file:
+            with (experiment/'logs/validation_log.csv').open() as file:
                 rows = list(csv.DictReader(file))
-            self.assertEqual([r['epoch'] for r in rows], ['0', '3'])
-            self.assertEqual(rows[0]['train_psnr'], '')
-            self.assertTrue(rows[1]['train_psnr'] and rows[1]['train_ssim'])
-            self.assertEqual(len(list((experiment/'visuals/epoch_0000/edge').glob('*.png'))), 2)
+            self.assertEqual([r['kind'] for r in rows], ['initial', 'smoke_final'])
+            self.assertEqual([int(r['count']) for r in rows], [100, 100])
             for label in ('low', 'edge', 'lit_up', 'output', 'gt'):
-                self.assertEqual(len(list((experiment/'visuals/epoch_0003'/label).glob('*.png'))), 2)
-            self.assertFalse((experiment/'final_test_outputs').exists())
+                self.assertEqual(len(list((experiment/'visuals/epoch_0003'/label).glob('*.png'))), 5)
             self.assertFalse((context['OUTPUT_ROOT']/context['EXPERIMENT_NAME']).exists())
             log_before = (experiment/'logs/training.log').read_text()
-            self.assertIn('INITIAL VALIDATION', log_before)
-            self.assertIn('Epoch 003/200', log_before)
             before = (experiment/'checkpoints/last.pth').read_bytes()
             with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(subprocess.CalledProcessError):
                 context['launch_run']('smoke')
@@ -123,66 +100,38 @@ class TrainCLITests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'configuration'):
                 context['launch_run']('full')
 
-    def test_cli_resumes_legacy_notebook_state_and_exports_completed_full_run(self):
+    def test_cli_full_resume_and_independent_test_without_training_directory(self):
         with tempfile.TemporaryDirectory(prefix='retinex CLI ') as temporary:
             root = Path(temporary)
             data = root/'data'
-            dataset(data)
+            dataset(data); dataset(data, 'Test')
             cfg = configuration(data)
             config_file = root/'run config.json'
             config_file.write_text(json.dumps(cfg))
-            resumed_root = root/'resumed'
-            # Original notebook setup, directly using helpers (no new entry point).
-            seed_everything(42)
-            names = sorted(p.name for p in (data/'Train/Low').glob('*.png'))
-            split = prepare_experiment(resumed_root, cfg, names)
-            loaders = build_epoch_loaders(data/'Train/Low', data/'Train/Normal', split,
-                                         batch_size=8, patch_size=16, num_workers=0, seed=42)
-            seed_everything(42)
-            model = RetinexFormer(**cfg['architecture'], canny_config=cfg['canny'])
-            optimizer = torch.optim.Adam(model.parameters(), lr=1e-6, betas=(0.9, 0.999), weight_decay=0.)
-            scheduler = EpochWarmupCosine(optimizer, **{key: cfg[key] for key in
-                ('num_epochs', 'warmup_epochs', 'warmup_start_lr', 'peak_lr', 'min_lr')})
-            with contextlib.redirect_stdout(io.StringIO()):
-                run_epoch_training(model, loaders[0], loaders[1], optimizer, scheduler,
-                    torch.amp.GradScaler('cuda', enabled=False), torch.device('cpu'), cfg,
-                    split, resumed_root, loaders[2], stop_after_epoch=1, log_every=3)
-            last = resumed_root/'checkpoints/last.pth'
-            legacy = torch.load(last, weights_only=True)
-            legacy['history'] = legacy['history'][1:]
-            torch.save(legacy, last)
-            before = last.read_bytes()
-            rejected = self.invoke(config_file, root, 'resumed', '--mode', 'full', '--evaluate-only', success=False)
-            self.assertIn('Complete the configured training run', rejected.stderr)
-            self.assertEqual(before, last.read_bytes())
+            self.invoke(config_file, root, 'official', '--mode', 'full')
+            experiment = root/'official'
+            cp_path = experiment/'checkpoints/last.pth'
+            before = cp_path.read_bytes()
+            cp = torch.load(cp_path, weights_only=True)
+            self.assertEqual(cp['global_step'], 348)
+            self.assertEqual([r['kind'] for r in cp['validation_history']], ['initial','final'])
+            self.invoke(config_file, root, 'official', '--mode', 'full', '--resume')
+            self.assertEqual(before, cp_path.read_bytes())
             changed = root/'changed.json'
             changed.write_text(json.dumps(dict(cfg, batch_size=4)))
-            rejected = self.invoke(changed, root, 'resumed', '--mode', 'full', '--resume', success=False)
+            rejected = self.invoke(changed, root, 'official', '--mode', 'full', '--resume', success=False)
             self.assertIn('Resume configuration differs', rejected.stderr)
-            self.assertEqual(before, last.read_bytes())
-            log = resumed_root/'logs/training.log'
-            log.write_text('Earlier session log\n')
-            self.invoke(config_file, root, 'resumed', '--mode', 'full', '--resume')
-            self.assertTrue(log.read_text().startswith('Earlier session log\n'))
-            self.assertIn('full training | resume', log.read_text())
-            self.invoke(config_file, root, 'uninterrupted', '--mode', 'full')
-            resumed = torch.load(last, weights_only=True)
-            complete = torch.load(root/'uninterrupted/checkpoints/last.pth', weights_only=True)
-            for key in ('model', 'optimizer', 'scheduler', 'scaler', 'rng', 'split', 'best', 'global_step'):
-                self.assert_nested_equal(resumed[key], complete[key])
-            for a, b in zip(resumed['history'], complete['history'][1:]):
-                self.assertEqual({k:v for k,v in a.items() if 'seconds' not in k},
-                                 {k:v for k,v in b.items() if 'seconds' not in k})
-            with (resumed_root/'logs/training_metrics.csv').open() as file:
-                self.assertEqual([r['epoch'] for r in csv.DictReader(file)], ['3', '4'])
-            dataset(data, 'Test', 2)
-            before = last.read_bytes()
-            self.invoke(config_file, root, 'resumed', '--mode', 'full', '--evaluate-only')
-            self.assertEqual(before, last.read_bytes())
-            with (resumed_root/'final_test_outputs/per_image_metrics.csv').open() as file:
-                rows = list(csv.reader(file))
-            self.assertEqual(rows[-1][0], 'AVERAGE')
-            self.assertEqual(len(list((resumed_root/'final_test_outputs/output').glob('*.png'))), 2)
+            # Testing accepts a selected checkpoint without Train or the last checkpoint.
+            import shutil
+            shutil.rmtree(data/'Train')
+            weights = experiment/'checkpoints/best.pth'
+            result = subprocess.run([sys.executable, str(REPO/'test.py'),
+                '--checkpoint', str(weights), '--dataset-root', str(data),
+                '--output-dir', str(root/'independent'), '--device', 'cpu'],
+                cwd=REPO, text=True, capture_output=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            self.assertEqual(len(list((root/'independent/enhanced_images').glob('*.png'))), 100)
+            self.assertEqual(before, cp_path.read_bytes())
 
     def test_console_log_streams_appends_and_records_failures(self):
         with tempfile.TemporaryDirectory() as temporary:

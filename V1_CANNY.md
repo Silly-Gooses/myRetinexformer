@@ -4,7 +4,8 @@ Version: `v1`. Baseline: the original RetinexFormer architecture.
 
 The single architectural change is a Canny edge channel at the restoration
 input. Illumination estimation, illumination-guided attention, feature widths,
-RGB correction, losses, dataset, and training hyperparameters remain unchanged.
+RGB correction and model architecture remain unchanged. Branch 1.1 restores the
+official dataset/evaluation workflow; see EPOCH_TRAINING.md for training changes.
 
 ## Actual architecture and changes
 
@@ -103,20 +104,26 @@ All other keys and shapes must match. Native v1 checkpoints load directly with
 `model.load_state_dict(...)`. Canny configuration is not part of the tensor
 state dict: preserve it with the checkpoint and reconstruct the model with the
 same settings. Notebook checkpoints record version, architecture, Canny configuration, and the
-complete epoch-training state. Resume validates the saved configuration and split.
+complete epoch-training state. Resume validates the saved configuration and official dataset manifest.
 
 Fresh v1 models also start with zero edge-channel weights. These remain trainable
 and receive gradients. Baseline conversion preserves initial baseline output to
 floating-point tolerance. Use a fresh optimizer after conversion: baseline
 optimizer states have incompatible embedding dimensions.
 
-The notebook launches `train.py`, which trains from scratch on branch `v1` using 200 epochs, including
-3 warm-up epochs, in `Lightweight_RetinexFormer_v1_LOLv2_real_Epoch200`.
-It reserves 10% of training pairs for validation and uses the official test set
-only for final evaluation. See [EPOCH_TRAINING.md](EPOCH_TRAINING.md) for configuration,
-logging, and resume. Commit/push separately before using remote Colab setup.
-Baseline comparison is no longer in the notebook; standalone comparison scripts
-and `test.py` still explicitly use baseline mode.
+The notebook launches `train.py` on branch `v1.1` with 200 epochs, including
+3 warm-up epochs, under `Proposed_RetinexFormer_V1_Official_Epoch200`. It trains
+on all 689 official Train pairs and validates on all 100 official Test pairs
+every 1,000 batch steps. Paired MixUp and norm-0.01 gradient clipping now match
+upstream. Canny operates on the actual augmented/mixed input tensor.
+
+`test.py` independently loads a selected Canny V1 checkpoint and evaluates the
+same 100 Test pairs. Test-based checkpoint selection means these results are not
+an independent held-out evaluation. Old split-run weights remain testable, but
+new-protocol training starts fresh. See [EPOCH_TRAINING.md](EPOCH_TRAINING.md) for
+configuration, smoke/full training, validation, checkpoint recovery and testing.
+Standalone author/retrained comparison scripts retain their existing baseline
+mode and saved-pixel metric semantics. Push branch v1.1 before remote Colab setup.
 
 ## Verification
 

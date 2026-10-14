@@ -1,325 +1,262 @@
-# Proposed v1 epoch training
+# Canny V1: official LOL-v2-real workflow (branch v1.1)
 
-Use the existing `Lightweight_RetinexFormer_Colab_Full_Training_v2.ipynb` on branch
-`v1`. This is a proposed-model notebook: setup → Drive/configuration →
-`train.py` launch → curves/visuals → final test evaluation. The script owns split,
-loader, model, optimizer and scheduler setup; `training_utils.py` remains the shared
-implementation for training, validation and checkpoint handling. The old
-iteration training and baseline comparison cells have been removed. Architecture,
-Canny defaults, Adam betas `(0.9, 0.999)`, batch size 8, patch size 256, and L1 loss
-remain unchanged. AMP remains off by default.
+Train from scratch on all **689** `Real_captured/Train` pairs. Validate on all
+**100** `Real_captured/Test` pairs during training. Independently test a selected
+checkpoint on those same 100 pairs. No images are moved or randomly partitioned.
 
-## Smoke check or full training
+**The official Test set selects the best checkpoint. Its final score is therefore
+not an independent held-out test evaluation.** Describe it as the official
+RetinexFormer validation/testing protocol in thesis comparisons.
 
-Choose `RUN_MODE` in the notebook configuration cell. The default is `"smoke"`;
-the separate smoke/full training cells execute only the selected mode, including
-when using Run all.
+## What changed
 
-- Smoke runs three complete epochs using the unchanged 200-epoch schedule, so
-  all three are warm-up epochs. It saves under `<EXPERIMENT_NAME>_Smoke3`, with
-  best/last checkpoints, CSV rows at epochs 0 and 3, curves and validation visuals at
-  epochs 0, 1 and 3. The curves mark individual points so the single CSV row is visible.
-- Full runs all configured epochs under the original `<EXPERIMENT_NAME>` folder.
-  After inspecting smoke results, set `RUN_MODE="full"`, `RESUME_FROM=None`, and
-  re-run configuration, then the full training cell. Each `train.py` invocation
-  starts a new process and resets seed, loaders, model and optimizer for independent
-  training from scratch. The launcher-definition cell only needs re-running after
-  a runtime restart or notebook code update.
-- Resume requires the same mode/folder and `RESUME_FROM=CKPT_DIR / "last.pth"`.
-  Fresh runs never overwrite existing folders; change `EXPERIMENT_NAME` for another
-  smoke check or independent full experiment. Existing full-run checkpoints retain
-  their original path and configuration compatibility.
+| Area | Previous epoch workflow | Branch 1.1 |
+| --- | --- | --- |
+| Training membership | 620 of 689 pairs | All 689 Train pairs |
+| Validation membership | 69 pairs reserved from Train | All 100 official Test pairs |
+| Validation timing | Every epoch | Every 1,000 batch steps, plus completion |
+| Training augmentation | Paired crop/flips/rotations; no MixUp | Upstream padding/crop/eight transforms; paired Beta(1.2, 1.2) MixUp with identity |
+| Gradient clipping | None | Norm 0.01, after AMP unscaling |
+| Validation PSNR | Rounded 8-bit images | Clamped, unquantized RGB, float64 MSE |
+| Testing | Legacy hardcoded baseline script or completion-gated export | Explicit selected Canny V1 checkpoint; no training dependency |
+| Checkpoints | Replaced best/last | Immutable periodic/best snapshots plus best/last aliases |
+| Membership record | Random `split.json` | Official `dataset_manifest.json` with decoded image hashes |
 
-Use validation metrics and the saved Low / Edge / Lit-up / Output / GT grids to
-check smoke results. The final official-test cell skips smoke mode. A three-epoch
-warm-up run checks execution and saved artifacts, not final restoration quality.
+The Canny architecture and thresholds are unchanged. Edges are extracted inside
+the model from the actual low-light tensor, **after** crop/augmentation/MixUp
+for training, or after full-image padding for evaluation. No precomputed edge
+maps are mixed or reused from a different input. The four required qualitative
+panels (input, lit-up, enhanced, GT) and the additional Canny panel are retained.
 
-## train.py entry point and Colab launcher
+Implementation files:
 
-`train.py` takes the existing training configuration as JSON and exposes:
+| Files | Responsibility |
+| --- | --- |
+| `train.py`, `official_workflow.py`, `training_utils.py` | Official membership, epoch execution, validation events, MixUp/clipping, logs and recovery |
+| `dataLoader.py`, `protocol_metrics.py` | Official preprocessing and separate float-PSNR/uint8-SSIM evaluation/export |
+| `test.py`, `smoke_test.py`, `official_lolv2_config.json` | Selected-checkpoint testing, two-update verification and editable defaults |
+| `Lightweight_RetinexFormer_Colab_Full_Training_v2.ipynb` | Branch-1.1 launch, Drive preflight, curves and independent testing |
+| `tests/official_fixtures.py`, `tests/test_official_workflow.py`, `tests/test_train_cli.py` | Synthetic protocol and integration regressions |
+| `EPOCH_TRAINING.md`, `EVALUATION.md`, `V1_CANNY.md` | Commands, numerical conventions, compatibility and remaining differences |
 
-- `--mode smoke|full` (default smoke); smoke stops at epoch 3 without shortening
-  the saved full schedule. Its experiment directory receives the `_Smoke3` suffix.
-- `--output-root` and `--experiment-name` select the experiment folder.
-- `--resume` uses that run's `checkpoints/last.pth`; `--resume-from PATH` accepts
-  an explicit path to the same checkpoint. These options are mutually exclusive.
-- `--log-every 3` controls reporting without changing strict checkpoint config.
-- `--device auto|cpu|cuda`; AMP still requires CUDA and defaults off in config.
-- `--evaluate-only --mode full` loads the best checkpoint after completed full
-  training and exports official test results without running any training.
+`RetinexFormer_arch.py`, `RetinexFormer_arch_og.py`, `canny.py`, legacy analysis
+helpers and dependency requirements are unchanged.
 
-For a standalone launch, save the notebook configuration as JSON (or reuse an
-existing run's `config.json` when its settings match):
+## Install and configure
 
-```python
-Path("run_config.json").write_text(json.dumps(CONFIG, indent=2))
+From the repository root:
+
+```bash
+python -m pip install -r requirements.txt
+cp official_lolv2_config.json run_config.json
 ```
+
+Edit `dataset_root` in `run_config.json` to the directory containing `Train` and
+`Test`, for example `/content/drive/MyDrive/datasets/LOLv2/Real_captured` in Colab.
+Pair names must match exactly between each `Low` and `Normal` directory. Matching
+filenames across Train/Test are allowed; shared paths or identical decoded low
+or normal images across the two splits are rejected. Every pair must decode,
+have matching dimensions, and support the 11×11 SSIM window.
+
+Defaults preserved from the notebook: 200 epochs; 3 warm-up epochs;
+LR `1e-6 → 1e-4 → 1e-6`; Adam, betas `(0.9, 0.999)`, zero weight decay; mean L1;
+batch size 8; patch size 256; seed 42; 2 training workers; AMP disabled;
+`n_feat=40`, one stage, blocks `[1,2,2]`; unchanged Canny settings.
+Validation/testing use full images, batch size 1, no shuffle or augmentation,
+and no evaluation autocast. Existing dependencies suffice.
+
+New required configuration fields are `dataset_protocol`, `val_freq_steps`,
+`mixup_beta`, and `grad_clip_norm`; the example supplies their official defaults.
+`val_fraction` is invalid in the new trainer. Retain the same configuration on
+resume. Old V1 model weights remain testable but old random-split histories
+cannot resume this protocol. Start a **new experiment**, as requested.
+
+## Preflight and lightweight smoke
+
+```bash
+python train.py --config run_config.json --output-root experiments --preflight
+python smoke_test.py --config run_config.json \
+  --output-dir experiments/Proposed_V1_QuickSmoke --device auto
+```
+
+Preflight checks all 689/100 pairs, shapes, pairing and cross-split content
+isolation. Quick smoke uses the configured production architecture/patch size,
+performs two training updates, asserts that weights changed, validates all 100
+pairs without changing weights, saves and reloads weights, and independently
+exports all 100 test predictions/metrics and qualitative panels. It does not run
+200 epochs. Choose a new output directory for each smoke invocation. Quick-smoke
+weights are inference snapshots, not production resume states.
+
+To also verify checkpoint storage on mounted Google Drive:
+
+```bash
+python train.py --config run_config.json --output-root experiments --preflight \
+  --check-storage /content/drive/MyDrive/RetinexFormer_full_training
+```
+
+The probe atomically writes and reloads a temporary tensor checkpoint and cleans
+it up. Both the trainer and smoke script support `--check-storage PATH`.
+This verifies the mounted filesystem, not remote Drive synchronization after
+a runtime disappears. Reopen the saved checkpoint after reconnecting to confirm
+cross-runtime persistence. The notebook writes experiment outputs directly to
+Drive, preserving its existing backup/persistence behavior.
+
+For the previous, longer three-epoch smoke (isolated `_Smoke3` directory):
 
 ```bash
 python train.py --config run_config.json --output-root experiments --mode smoke
-python train.py --config run_config.json --output-root experiments --mode full
-python train.py --config run_config.json --output-root experiments --mode full --resume
-python train.py --config run_config.json --output-root experiments --mode full --evaluate-only
 ```
 
-The notebook performs this handoff automatically using a temporary JSON file and
-an argument list (paths with spaces work). It streams the child process output,
-raises on failure, and terminates the child if the cell is interrupted. Permanent
-configuration and manifests remain inside the experiment directory. Curves and
-saved validation panels are viewed in subsequent notebook cells; no in-memory
-training model is needed. The final evaluation cell invokes the same script in
-`--evaluate-only` mode and skips smoke runs.
+This traverses all training pairs for three epochs, keeps the 200-epoch LR
+schedule, and runs a clearly labeled `smoke_final` validation at step 261.
+Neither smoke mode silently truncates the configured production schedule.
 
-The script sets deterministic CUDA configuration before initializing CUDA.
-Configuration schema, experiment paths and checkpoint format are unchanged, so
-existing notebook epoch checkpoints can resume. Dataset, architecture, batch size
-and schedule mismatches are still rejected. Optional correctness tests and GPU
-benchmarks are opt-in in the notebook. Colab's Git setup requires this script and
-updated notebook to be available on remote branch `v1`; no commit/push is automatic.
-
-## Epoch 0: initial validation
-
-Fresh smoke/full runs evaluate all validation images before any training update.
-The existing full-image padding, floating-point L1 and saved-8-bit PSNR/SSIM
-implementations are used in evaluation/inference mode. Epoch 0 always appears in
-CSV and console, regardless of `LOG_EVERY`. `global_step=0`, `is_best=False`;
-training loss/PSNR/SSIM and LR are `None` (blank CSV, N/A console, gaps in curves).
-Epoch-0 timing includes validation/visualization and contributes to elapsed time.
-
-With visualization enabled, the fixed validation samples also produce five-panel
-images in `visuals/epoch_0000/`. RNG and loader-generator states are restored after
-initial diagnostics, so training data order and augmentation do not change.
-
-After successful initial validation, `last.pth` is atomically saved with
-`completed_epoch=0` and scheduler epoch 0. Resume starts epoch 1 without repeating
-initial evaluation. No `best.pth` is created at epoch 0: only trained epochs
-participate in best selection, even if their PSNR is below the initial score.
-The scheduler stays at its initial state until epoch 1 sets the warm-up LR.
-
-Fresh checkpoints retain history `0..completed_epoch`; older checkpoints with
-history `1..completed_epoch` still load without backfilling initial metrics.
-Configuration schema and checkpoint format identifier are unchanged. New
-checkpoints require the updated loader; older code may reject epoch-0 history.
-The 200 training epochs and three warm-up epochs remain unchanged. Final test
-evaluation still requires completion of the full schedule and uses `best.pth`.
-
-## Schedule
-
-All settings are editable in the configuration cell:
-
-| Setting | Default |
-| --- | --- |
-| `NUM_EPOCHS` | 200 (includes warm-up) |
-| `WARMUP_EPOCHS` | 3 |
-| `WARMUP_START_LR` | `1e-6` |
-| `PEAK_LR` | `1e-4` |
-| `MIN_LR` | `1e-6` |
-| `SEED` | 42 |
-
-LR is constant during an epoch. Epochs 1–3 use `1e-6`, `5.05e-5`, `1e-4`.
-For epoch `e > 3`, LR is
-`1e-6 + (1e-4 - 1e-6) * (1 + cos(pi * (e - 3) / 197)) / 2`.
-Epoch 200 uses exactly `1e-6`. `EpochWarmupCosine.set_epoch(e)` runs before
-training batches; do not also call an iteration scheduler. `global_step` counts
-batches for reporting, not schedule control. The final partial batch is included.
-
-## Data separation and reproducibility
-
-Sorted training filenames are shuffled using a local Python RNG with seed 42.
-`ceil(0.1 * N)` pairs are held out; the remainder train with existing random
-crops and geometric augmentation. Full-image validation has no augmentation.
-The exact split is stored in `split.json`; `config.json` stores training settings.
-Both train and validation subsets must be nonempty.
-
-The official test set is loaded only in final evaluation after the configured
-training run completes. Best-checkpoint selection uses validation PSNR, never
-test PSNR. Equal validation PSNR retains the earlier best. Validation L1 is the
-mean per-image loss on unclamped model predictions; PSNR/SSIM use the repository's
-existing saved-8-bit-pixel implementation. Training loss is sample-weighted.
-
-Python, NumPy, PyTorch, CUDA, worker seeds, and separate loader generators are
-controlled. Worker persistence is disabled so an epoch-boundary resume can
-recreate worker augmentation streams. cuDNN benchmarking is off and deterministic
-algorithms are required. Set `CUBLAS_WORKSPACE_CONFIG=:4096:8` before CUDA work,
-as the first notebook cell does. An unsupported deterministic operation raises
-rather than silently becoming nondeterministic. Exact numerical reproduction
-across different hardware or PyTorch versions is not promised.
-
-## Checkpoints and resume
-
-The default experiment directory on Drive is:
-
-```text
-RetinexFormer_full_training/Lightweight_RetinexFormer_v1_LOLv2_real_Epoch200/
-  config.json
-  split.json
-  checkpoints/best.pth
-  checkpoints/last.pth
-  logs/training_metrics.csv
-  logs/training.log
-  logs/training_curves.png
-  visuals/epoch_0001/...
-  final_test_outputs/...
-```
-
-A fresh run refuses to overwrite a nonempty experiment directory. Change
-`EXPERIMENT_NAME` for an independent run. To resume the existing run, use:
-
-```python
-RESUME_FROM = CKPT_DIR / "last.pth"
-```
-
-Re-run configuration and the matching training cell with unchanged settings.
-After a runtime restart, also run the launcher-definition cell.
-Resume restores model, optimizer, scheduler, scaler, completed epoch, global
-step, best PSNR/associated SSIM/epoch, complete metric history, and RNG/generator
-states. It continues at the next epoch and does not restart warm-up. An interrupted
-partial epoch is repeated from the preceding completed epoch. Old iteration
-checkpoints cannot resume this workflow. Increasing `NUM_EPOCHS` on resume is
-rejected because it changes the saved cosine schedule; this implementation does
-not silently reinterpret an existing run.
-
-Files are saved via a temporary file in the same directory and replaced only
-once written. This avoids overwriting a valid local checkpoint with a partial
-write; it does not guarantee Google Drive's remote synchronization during a
-runtime failure. `last.pth` is the authoritative committed epoch. Its history
-rebuilds CSV at the selected reporting interval on resume, removing stale/duplicate rows. `best.pth` is written before
-`last.pth`; a crash between these writes is recovered by replaying that epoch.
-Checkpoints use tensors and primitive types and load with `weights_only=True`.
-
-## Outputs and checks
-
-Validation and checkpoint updates still run every epoch. The notebook uses
-`LOG_EVERY=3` for CSV/console output: epochs 0, 3, 6, ..., 198, and 200 (68 rows for fresh runs).
-Each row reports that epoch, not an average of the preceding three epochs.
-Checkpoint history retains every epoch for resume. `LOG_EVERY` is a presentation
-setting, outside the strict training configuration, so existing checkpoints can
-resume with the new reporting interval. The helper defaults to `log_every=1`
-for compatibility; the notebook passes its explicit setting.
-
-Reported fields are train/validation L1, train/validation PSNR and SSIM, LR actually used,
-global step, epoch/cumulative processing time, and best flag. Times include
-validation/visual generation but exclude checkpoint I/O and disconnected time.
-Fixed validation examples are saved at epochs 0 and 1, every 10 epochs, and the last
-epoch of the selected run (including an early smoke stop): Low / Edge / Lit-up / Output / GT, both individual PNGs and a five-panel
-grid. The curve cell plots loss, validation metrics and LR. Final test evaluation
-loads `best.pth`, exports all test images and per-image/average metrics.
+## Full training and resume
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+python train.py --config run_config.json --output-root experiments --mode full
+python train.py --config run_config.json --output-root experiments --mode full --resume
 ```
 
-Tests compare uninterrupted versus resumed synthetic training, including worker
-processes, exact model/optimizer states and augmentation inputs; time columns are
-expected to differ. Other checks cover LR boundaries, split membership, final
-partial batches, best/last ties, invalid resume, CSV repair, interrupted writes,
-validation and five-panel Canny exports. Full training is not run by these tests.
+The default experiment is `Proposed_RetinexFormer_V1_Official_Epoch200`.
+Use `--experiment-name NAME` for another fresh experiment. Fresh runs refuse
+nonempty output directories. `--resume-from` accepts only that experiment's
+`checkpoints/last.pth`.
 
-### Local verification (2026-10-09)
+With `drop_last=False`, `len(train_loader)=ceil(689/8)=87`: 86 complete batches
+and one single-pair batch. Every pair contributes once per epoch. Singleton
+MixUp is naturally the identity. The 200-epoch schedule comprises **17,400 batch
+steps**. Counters advance inside the actual loop; AMP-skipped optimizer updates,
+if AMP is enabled, still count as batch iterations, as in upstream.
 
-- Eight epoch-training tests passed, including exact uninterrupted/resumed
-  equivalence with zero and two DataLoader workers.
-- All 15 existing runnable Canny/analysis tests passed; two CUDA tests skipped.
-- Executed the actual notebook's configuration, split, full v1 model, training,
-  plotting and final-export cells with temporary synthetic data: four epochs
-  including three warm-up epochs, nine training pairs, two validation pairs and
-  two test pairs. Checkpoints, CSV, curves, five-panel visuals and test exports
-  were created successfully. This was a CPU smoke run, not the 200-epoch experiment.
-- Python/notebook syntax and `git diff --check` passed. GPU epoch training remains
-  unverified on this CPU-only environment.
+Validation runs exactly at steps 1000, 2000, …, 17000 and finally 17400. The
+interval is 1000/87 ≈ **11.4943 epochs**, first occurring at epoch 12, batch 43.
+It is not rounded to an epoch frequency. Initial step-0 validation is diagnostic
+and cannot select best. A final event is not duplicated when it lands exactly
+on an interval. `val_freq_steps` may be changed for an explicitly different run;
+small-interval regression tests also cover multiple validations within an epoch.
 
+The scheduler still advances only at the start of an epoch. Validation disables
+gradients, restores model mode and preserves training RNG/loader-generator state.
+Training loss and online crop PSNR/SSIM are sample-weighted epoch means; they
+are not an additional final-model pass over the training set.
 
-### Training PSNR/SSIM and existing runs
+## Checkpoints and outputs
 
-`train_psnr` and `train_ssim` are mean per-image scores over all augmented crops
-seen in that epoch, including the final partial batch. Each score uses the
-prediction from that batch's training forward, before its optimizer update.
-The metrics detach the predictions and use the same clamped/rounded 8-bit RGB
-PSNR/SSIM functions as validation. There is no additional model inference pass;
-CPU image conversion and SSIM calculation do add measurement overhead. Crops
-must be at least 11×11 for the existing SSIM window.
+```text
+experiments/Proposed_RetinexFormer_V1_Official_Epoch200/
+  config.json
+  dataset_manifest.json
+  checkpoints/
+    last.pth                     # Full state, each completed epoch (including 0)
+    best.pth                     # Alias to selected immutable model snapshot
+    step_<step>_<reason>_<id>.pth # Immutable periodic/best model snapshots
+  logs/
+    training.log                 # Streaming console/session log
+    train_log.csv                # Every epoch, including diagnostic epoch 0
+    training_metrics.csv         # Compatibility CSV filtered by --log-every
+    validation_log.csv           # Every actual validation event
+  validation/metrics.csv         # Per-image metrics with event/step/protocol
+  visuals/epoch_<epoch>/          # Low, edge, lit_up, output, GT, and grids
+  testing/<evaluation-name>/
+    enhanced_images/
+    per_image_metrics.csv
+    summary_metrics.csv
+    provenance.json
+    visuals/
+```
 
-Validation uses full images with the final model state for that epoch in eval
-mode. Thus train/validation curves share a metric definition but differ in data,
-augmentation and model state; they are diagnostic curves, not accuracy percentages
-or a controlled full-image generalization-gap measurement. Best selection remains
-based only on validation PSNR.
+`last.pth` contains model, optimizer, epoch scheduler, AMP scaler, RNG and loader
+states, official membership/content manifest, histories, and committed best
+selection. Resume begins after its last completed epoch; an interrupted partial
+epoch is replayed. CSV files and the best alias are reconciled from committed
+state. Uncommitted immutable snapshots remain preserved but are not silently
+adopted as the best checkpoint. Periodic model snapshots are saved every 1,000
+batch steps; improving validation also saves an immutable snapshot. These model
+snapshots and `best.pth` support testing, while `last.pth` supports full resume.
+Only aliases inside the new experiment are replaced. Existing experiments and
+immutable snapshots are not overwritten.
 
-Existing epoch checkpoints can resume without changing training configuration.
-Historical epochs that did not record training PSNR/SSIM keep blank CSV fields;
-those values cannot be reconstructed from the last checkpoint. New epochs record
-both metrics, and notebook plots show gaps for unavailable history rather than
-inventing zeros. CSV/console still report every 3 epochs plus the final epoch;
-checkpoint history keeps all epoch metrics for recovery.
+`--log-every` affects console reporting and the compatibility CSV only. Canonical
+training/validation logs retain every event. Epoch CSV validation cells are blank
+unless validation occurred at that epoch's final step; use `validation_log.csv`
+for the complete curve. Checkpoint selection uses PSNR only and retains the first
+checkpoint on a tie. Visuals are saved at epoch 0, 1, every 10, and completion.
 
-### Logging/metric verification (2026-10-10)
+## Independent testing
 
-- Full regression suite: 30 tests run, 28 passed, two CUDA tests skipped because
-  CUDA is unavailable. This includes exact uninterrupted/resumed worker training,
-  per-image training metric weighting, unchanged optimizer updates, legacy metric
-  history recovery, and three-epoch logging with best selection between log rows.
-- Re-executed the notebook workflow on temporary synthetic data for four epochs:
-  CSV/console contained epochs 3 and 4, paired training/validation quality curves
-  rendered, and checkpoints, five-panel visuals and final test exports succeeded.
-- Python/notebook syntax and `git diff --check` passed. No full training was run.
+```bash
+python test.py \
+  --checkpoint experiments/Proposed_RetinexFormer_V1_Official_Epoch200/checkpoints/best.pth \
+  --dataset-root /path/to/Real_captured \
+  --output-dir experiments/Proposed_RetinexFormer_V1_Official_Epoch200/testing/best_run \
+  --device auto
+```
 
-### Smoke/full mode verification (2026-10-10)
+Any compatible selected V1 checkpoint can be tested, including `last.pth` or
+an immutable snapshot, before epoch 200. Only `Test` is required on disk. Model
+and Canny configuration come from checkpoint metadata. Supply `--config PATH`
+for bare/older wrappers without metadata. Strict loading rejects baseline
+three-channel weights instead of silently disabling Canny. Existing output
+folders are rejected. `train.py --mode full --evaluate-only` remains an alias
+for independent testing of `best.pth`, using a fresh timestamped output folder.
 
-- All 13 single-process epoch-training tests passed, including the new three-epoch
-  smoke test for unchanged 200-epoch scheduling and final smoke visuals.
-- Executed the actual notebook cells with the full v1 architecture and synthetic
-  images: smoke stopped at epoch 3, exported epoch-3 visuals and skipped official
-  test loading. Switching modes without setup was rejected; re-running full setup
-  reproduced the initial model weights with an empty optimizer and a separate folder.
-- A shortened four-epoch full-mode check completed training, plots and test export
-  without modifying the smoke checkpoint. Syntax and diff whitespace checks passed.
-  This follow-up used CPU only; no real-data/full 200-epoch or GPU run was performed.
+## Metric protocol and remaining differences
 
-### train.py entry-point verification (2026-10-10)
+Reference sources inspected for this implementation:
 
-- Full regression suite: 34 tests run, 32 passed, two CUDA checks skipped because
-  CUDA is unavailable. Three new tests cover process-level notebook launching,
-  old-helper checkpoint resume, CLI final evaluation, and invalid run requests.
-- A checkpoint created with the former notebook setup resumes through `train.py`
-  with exactly matching model, optimizer, scheduler, RNG state and non-timing
-  history versus uninterrupted training. Changed configuration and premature
-  final evaluation are rejected without replacing checkpoints.
-- Executed the updated notebook launcher, smoke/full cells, plots and final export
-  with the full v1 architecture on synthetic CPU data. Smoke used three epochs of
-  the 200-epoch schedule; the full-mode check used a shortened four-epoch schedule.
-  Separate folders, final smoke visuals and subprocess error propagation passed.
-- Default CONFIG matches the previous notebook exactly. Python/notebook syntax
-  and `git diff --check` passed. No Colab GPU or real-data 200-epoch run was made.
+- [Official LOL-v2-real options](https://github.com/caiyuanhao1998/Retinexformer/blob/master/Options/RetinexFormer_LOL_v2_real.yml)
+- [Dataset](https://github.com/caiyuanhao1998/Retinexformer/blob/master/basicsr/data/paired_image_dataset.py), [transforms](https://github.com/caiyuanhao1998/Retinexformer/blob/master/basicsr/data/transforms.py), and [DataLoader](https://github.com/caiyuanhao1998/Retinexformer/blob/master/basicsr/data/__init__.py)
+- [Training loop](https://github.com/caiyuanhao1998/Retinexformer/blob/master/basicsr/train.py) and [restoration/validation model](https://github.com/caiyuanhao1998/Retinexformer/blob/master/basicsr/models/image_restoration_model.py)
+- [Validation metrics](https://github.com/caiyuanhao1998/Retinexformer/blob/master/basicsr/metrics/psnr_ssim.py), [tensor conversion](https://github.com/caiyuanhao1998/Retinexformer/blob/master/basicsr/utils/img_util.py), [testing](https://github.com/caiyuanhao1998/Retinexformer/blob/master/Enhancement/test_from_dataset.py), and [testing metrics](https://github.com/caiyuanhao1998/Retinexformer/blob/master/Enhancement/utils.py)
 
-### Epoch-0 verification (2026-10-12)
+Validation uses RGB PSNR, zero border crop, no Y conversion, and float64 MSE on
+clamped float predictions. Upstream `use_image=false` scores CPU tensors; its
+preceding `tensor2img` call clamps that shared CPU storage in place, even though
+the rounded images are not used for PSNR. This implementation clamps explicitly
+without mutating the caller's prediction. Exact validation matches yield infinity.
 
-- Full suite: 36 tests run, 34 passed, two CUDA tests skipped (CUDA unavailable).
-- Initial checkpoint preserves model/optimizer/RNG/generator state; resume from
-  epoch 0 matches uninterrupted training without repeating initial validation.
-  Initial PSNR is excluded from best selection even when higher than trained scores.
-- Legacy histories still resume without backfilling epoch 0. Inconsistent steps,
-  scheduler state and empty history are rejected. Worker resume checks passed.
-- Actual notebook/CLI smoke and shortened full runs on synthetic CPU data produced
-  epoch-0 visuals, CSV rows 0/3 (smoke) and 0/3/4 (full check), valid curves with
-  blank training/LR values, and final test exports. Syntax/whitespace checks passed.
-  No real-data full training, commit or push was performed for this update.
+Testing clamps float32 RGB output, removes reflection padding, and computes
+float32 PSNR before PNG quantization (exact match: 100 dB). Both workflows use
+the testing script's RGB-channel-averaged 11×11, sigma-1.5 Gaussian SSIM on rounded
+uint8 images. SSIM is a thesis addition to validation, whose official config only
+requests PSNR. Dataset means average image scores, not pooled pixel errors.
+A saved PNG's recomputed PSNR may differ slightly from the reported float PSNR.
 
-## Console transcript
+The restoration reproduces dataset/evaluation behavior, **not the complete
+original training budget**. Deliberate differences remain: Canny V1; 200 epochs
+(17,400 batches) instead of 150,000 iterations; the existing 3-epoch warm-up and
+epoch cosine schedule with 1e-4 peak instead of the upstream cyclic schedule;
+seed 42 and deterministic training; two training workers; no dropped final
+partial batch; extra initial diagnostics, SSIM, visualizations and immutable
+checkpoint retention. Validation/testing use direct full-image inference for
+LOL-v2-real; no GT-mean correction or self-ensemble. The existing tiny-image
+replicate-padding fallback is retained where reflection padding is impossible.
+The upstream high-resolution split-and-test branch is outside this dataset's
+normal dimensions and is not introduced here. Legacy author/retrained analysis
+continues to use its existing saved-pixel metrics, explicitly separate from this
+protocol.
 
-`train.py` mirrors Python stdout/stderr to `logs/training.log` while retaining
-console output in Colab and terminal runs. Writes are flushed promptly. Each fresh,
-resume or final-test evaluation session has a UTC timestamp and label. Resume and
-evaluation append to the same file; they never truncate previous output. The log
-includes training configuration, progress, warnings and session error tracebacks.
+## Verification
 
-Logging begins after experiment/split validation succeeds, preserving fresh-run
-overwrite protection. Earlier argument/configuration/dataset-validation errors
-remain console-only. Native code or child workers writing directly to OS file
-descriptors are not intercepted. A forcibly terminated runtime may not leave an
-error traceback; flush does not guarantee remote Drive synchronization. Metrics
-CSV and checkpoint/resume behavior are unchanged.
+```bash
+OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
+```
 
-Verification (2026-10-12): all four CLI/launcher tests passed on CPU, including
-live log visibility, warnings, failure/interruption tracebacks, append-on-resume,
-overwrite rejection, unchanged checkpoint equivalence and notebook smoke output.
-Python/notebook syntax and diff whitespace checks passed. No GPU/full-data run.
+Tests use synthetic images (including fixtures with 689/100 counts) and reduced
+models to exercise coverage, augmentation, metric formulas, Canny input, weight
+updates, read-only evaluation, exact validation events, interrupted replay,
+checkpoint protection, notebook/CLI integration and output files. These do not
+substitute for running the preflight/smoke on your real dataset. CUDA tests skip
+when CUDA is unavailable; multi-worker tests need working shared memory.
+
+No full training, actual LOL-v2 scores, or live Google Drive verification is
+claimed from local synthetic tests. Run the provided preflight and quick smoke
+in Colab before the full experiment.
+
+Local verification on 2026-10-14 (Python 3.14, PyTorch 2.12, CPU): **46 tests
+run, 44 passed, 2 CUDA tests skipped**. The multi-worker resume regression passed
+outside the sandbox (the sandbox itself blocks `torch_shm_manager`). The nine
+new protocol tests also passed after the final selected-checkpoint read/provenance
+fix. No real dataset, trained production checkpoint, CUDA device or mounted
+Google Drive was available locally.

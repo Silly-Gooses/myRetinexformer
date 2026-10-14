@@ -1,3 +1,16 @@
+# Evaluation entry points
+
+For the branch-1.1 Canny V1 official protocol, use `test.py --checkpoint PATH
+--dataset-root ROOT --output-dir NEW_DIRECTORY`. See [EPOCH_TRAINING.md](EPOCH_TRAINING.md)
+for runnable commands and numerical conventions. It evaluates all 100 official
+Test pairs without loading Train or restarting training. PSNR is computed on
+clamped float RGB; SSIM and PNGs use rounded uint8 RGB. Checkpoint selection also
+uses Test, so this is not an independent held-out evaluation.
+
+The author-versus-retrained analysis below is a separate diagnostic workflow.
+Its existing metrics intentionally describe saved 8-bit pixels and have not been
+silently changed to the new training/testing protocol.
+
 # LOL-v2 Real author-versus-retrained analysis
 
 This inference-only workflow compares the official author checkpoint and a

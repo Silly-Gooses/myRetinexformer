@@ -6,6 +6,51 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
+import cv2
+import numpy as np
+
+
+class OfficialPairedDataset(Dataset):
+    """Official paired crop/augmentation protocol; no dataset partitioning.
+
+    ``pairs`` is a validated list of (name, low_path, normal_path). Keep the
+    legacy dataset below unchanged for existing analysis callers.
+    """
+    def __init__(self, pairs, patch_size=None):
+        self.pairs = list(pairs)
+        self.patch_size = patch_size
+
+    def __len__(self):
+        return len(self.pairs)
+
+    @staticmethod
+    def read(path):
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ValueError(f"Cannot decode image: {path}")
+        return cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    def __getitem__(self, index):
+        name, low_path, high_path = self.pairs[index]
+        low, high = self.read(low_path), self.read(high_path)
+        if low.shape != high.shape:
+            raise ValueError(f"Pair dimensions differ: {name}")
+        images = [low.astype(np.float32) / 255., high.astype(np.float32) / 255.]
+        if self.patch_size is not None:
+            size = self.patch_size
+            h, w = low.shape[:2]
+            images = [cv2.copyMakeBorder(im, 0, max(0, size-h), 0,
+                       max(0, size-w), cv2.BORDER_REFLECT) for im in images]
+            top = random.randint(0, images[0].shape[0] - size)
+            left = random.randint(0, images[0].shape[1] - size)
+            mode = random.randint(0, 7)
+            images = [im[top:top+size, left:left+size] for im in images]
+            images = [np.rot90(im, k=mode // 2) for im in images]
+            if mode % 2:
+                images = [np.flipud(im) for im in images]
+        low, high = [torch.from_numpy(np.ascontiguousarray(im.transpose(2, 0, 1)))
+                     for im in images]
+        return {"low": low, "high": high, "name": name}
 
 
 class paired_image_Dataset(Dataset):

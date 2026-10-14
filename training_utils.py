@@ -261,10 +261,12 @@ def load_epoch_checkpoint(path, config, split):
 
 
 def train_one_epoch(model, loader, optimizer, scaler, device, use_amp=False,
-                    return_metrics=False):
+                    return_metrics=False, *, mixup_beta=None, grad_clip_norm=None,
+                    on_step=None, metric_fn=None, max_steps=None):
     """Optionally score each training crop's pre-update output, without another forward.
 
-    PSNR/SSIM use the same clamped, rounded 8-bit convention as validation.
+    Legacy callers use clamped, rounded 8-bit metrics. ``metric_fn`` lets the
+    official workflow supply unquantized PSNR without changing analysis callers.
     These are online training-mode metrics, not a final-model evaluation pass.
     """
     model.train()
@@ -272,6 +274,13 @@ def train_one_epoch(model, loader, optimizer, scaler, device, use_amp=False,
     psnr_total, ssim_total = 0.0, 0.0
     for batch in loader:
         low, high = batch["low"].to(device), batch["high"].to(device)
+        if mixup_beta is not None and random.randint(0, 1) == 0:
+            # Upstream uses a single lambda/permutation for both paired tensors.
+            lam = torch.distributions.Beta(torch.tensor([mixup_beta]),
+                                          torch.tensor([mixup_beta])).rsample((1, 1)).item()
+            order = torch.randperm(low.size(0)).to(low.device)
+            low = lam * low + (1 - lam) * low[order]
+            high = lam * high + (1 - lam) * high[order]
         if return_metrics and min(low.shape[-2:]) < 11:
             raise ValueError("Training PSNR/SSIM requires crops at least 11 pixels wide and high")
         optimizer.zero_grad(set_to_none=True)
@@ -281,17 +290,27 @@ def train_one_epoch(model, loader, optimizer, scaler, device, use_amp=False,
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite training loss; epoch was not checkpointed")
         scaler.scale(loss).backward()
+        if grad_clip_norm is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
         scaler.step(optimizer)
         scaler.update()
         if return_metrics:
             for output, gt in zip(prediction.detach().float(), high.detach().float()):
-                psnr, ssim = image_metrics(tensor_to_uint8(output), tensor_to_uint8(gt))
+                if metric_fn is None:
+                    psnr, ssim = image_metrics(tensor_to_uint8(output), tensor_to_uint8(gt))
+                else:
+                    psnr, ssim = metric_fn(output, gt)
                 psnr_total += psnr
                 ssim_total += ssim
         size = low.shape[0]
         total += float(loss.detach()) * size
         samples += size
         steps += 1
+        if on_step is not None:
+            on_step(steps)
+        if max_steps is not None and steps >= max_steps:
+            break
     if samples == 0:
         raise ValueError("Empty training loader")
     if return_metrics:

@@ -1,88 +1,25 @@
-import os
+"""Independent Canny V1 evaluation on all 100 official LOL-v2-real Test pairs."""
+
 import argparse
-import time
-from dataLoader import get_dataloaders
-import logging
+import json
+from pathlib import Path
 
-from RetinexFormer_arch import RetinexFormer
-# from waveletRetinexFormer import RetinexFormer
-
-import torch
-from analysis_utils import evaluate
-
-parser = argparse.ArgumentParser(description='RetinexFormer Testing Script')
-parser.add_argument('--dataset', type=str, help='dataset name', choices=['LOLv1', 'LOLv2_synthetic', 'LOLv2_real'], required=True)
+from protocol_metrics import test_checkpoint
 
 
-    
-def test(model, loader, device, logger):
-    return evaluate(model, loader, device)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--checkpoint', type=Path, required=True)
+    parser.add_argument('--dataset-root', type=Path, required=True, help='Real_captured directory')
+    parser.add_argument('--output-dir', type=Path, required=True, help='New output directory')
+    parser.add_argument('--config', type=Path, help='Model/Canny config for checkpoints without metadata')
+    parser.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
+    args = parser.parse_args(argv)
+    from train import resolve_device
+    config = json.loads(args.config.read_text()) if args.config else None
+    return test_checkpoint(args.checkpoint, args.dataset_root, args.output_dir,
+                           resolve_device(args.device, False), config)
 
 
 if __name__ == '__main__':
-    args = parser.parse_args()
-
-    os.makedirs('logs', exist_ok=True)
-    log_file = os.path.join('logs', f"psnr_{args.dataset}_{time.strftime('%Y%m%d_%H%M%S')}.log")
-    logger = logging.getLogger('psnr_logger')
-    
-    logger.setLevel(logging.INFO)
-
-    # Prevent duplicate logs if the function/script is called multiple times
-    if not logger.handlers:
-        # 3. Define the log message format
-        formatter = logging.formatters if hasattr(logging, 'formatters') else None
-        formatter = logging.Formatter('[%(asctime)s] [%(levelname)s] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-
-        # 4. File Handler (writes logs to disk)
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-        # 5. Console Handler (prints logs to stdout)
-        console_handler = logging.StreamHandler()
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
-
-    if args.dataset == 'LOLv1':
-        #### LOLv1 dataset paths
-        low_dir_train = '/home/htoo/Retinexformer/Datasets/LOLv1/Train/input/'
-        normal_dir_train = '/home/htoo/Retinexformer/Datasets/LOLv1/Train/target/'
-        low_dir_test = '/home/htoo/Retinexformer/Datasets/LOLv1/Test/input/'
-        normal_dir_test = '/home/htoo/Retinexformer/Datasets/LOLv1/Test/target/'
-        checkpoint_path = '/home/htoo/MyRetinexformer/pretrained_weights/LOL_v1.pth'
-    elif args.dataset == 'LOLv2_synthetic':
-        #### LOLv2_synthetic dataset paths
-        low_dir_train = '/home/htoo/Retinexformer/Datasets/LOLv2/Synthetic/Train/Low/'
-        normal_dir_train = '/home/htoo/Retinexformer/Datasets/LOLv2/Synthetic/Train/Normal/'
-        low_dir_test = '/home/htoo/Retinexformer/Datasets/LOLv2/Synthetic/Test/Low/'
-        normal_dir_test = '/home/htoo/Retinexformer/Datasets/LOLv2/Synthetic/Test/Normal/'
-        checkpoint_path = '/home/htoo/MyRetinexformer/pretrained_weights/LOL_v2_synthetic.pth'
-    elif args.dataset == 'LOLv2_real':
-        #### LOLv2_real dataset paths
-        low_dir_train = '/home/htoo/Retinexformer/Datasets/LOLv2/Real_captured/Train/Low'
-        normal_dir_train = '/home/htoo/Retinexformer/Datasets/LOLv2/Real_captured/Train/Normal'
-        low_dir_test = '/home/htoo/Retinexformer/Datasets/LOLv2/Real_captured/Test/Low'
-        normal_dir_test = '/home/htoo/Retinexformer/Datasets/LOLv2/Real_captured/Test/Normal'
-        checkpoint_path = '/home/htoo/MyRetinexformer/pretrained_weights/LOL_v2_real.pth'
-        # checkpoint_path = '/home/htoo/MyRetinexformer/LOLv2_real/best_wavelet_retinexformer_LOLv2_real.pth'
-    else:
-        raise ValueError("Invalid dataset specified")
-
-
-    train_loader, test_loader = get_dataloaders(low_dir_train, normal_dir_train, low_dir_test, normal_dir_test,use_mixup=True)
-
-    model = RetinexFormer(in_channels=3, out_channels=3, n_feat=40, stage=1, num_blocks=[1, 2, 2], edge_guidance=False)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
-    state_dict = torch.load(checkpoint_path, map_location=device)
-    
-    model.load_state_dict(state_dict['params'])
-    # model.load_state_dict(state_dict)
-    print("Model setup complete.")
-
-    test_psnr, test_ssim = test(model, test_loader, device, logger)
-    print(f'Test PSNR: {test_psnr:.2f}')
-    print(f'Test SSIM: {test_ssim:.4f}')
-    print("Testing complete.")
+    main()
