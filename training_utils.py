@@ -361,13 +361,15 @@ def save_epoch_visuals(model, dataset, indices, device, directory):
             panels = [("low", low[0]), ("edge", details["edge"][0, :, :h, :w]),
                       ("lit_up", details["lit_up"][0, :, :h, :w]),
                       ("output", details["output"][0, :, :h, :w]), ("gt", sample["high"])]
+            if "gate_map" in details:
+                panels.insert(3, ("gate", details["gate_map"][0, :, :h, :w].mean(0, keepdim=True)))
             grid = Image.new("RGB", (w * len(panels), h + 26), "white")
             draw = ImageDraw.Draw(grid)
             name = Path(sample["name"]).stem + ".png"
             for column, (label, tensor) in enumerate(panels):
                 folder = directory / label
                 folder.mkdir(exist_ok=True)
-                if label == "edge":
+                if label in ("edge", "gate"):
                     pixels = (tensor[0].float().clamp(0, 1).cpu().numpy() * 255).round().astype(np.uint8)
                     image = Image.fromarray(pixels)
                 else:

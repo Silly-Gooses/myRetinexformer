@@ -91,23 +91,23 @@ def test_checkpoint(checkpoint_path, dataset_root, output_dir, device, config=No
     checkpoint = torch.load(io.BytesIO(checkpoint_bytes), map_location="cpu", weights_only=True)
     stored = checkpoint.get("config") if isinstance(checkpoint, dict) else None
     if stored is not None:
-        for key in ("architecture", "canny", "edge_guidance"):
+        for key in ("architecture", "canny", "edge_guidance", "version", "gated"):
             if config is not None and config.get(key) != stored.get(key):
                 raise ValueError(f"Explicit {key} differs from checkpoint metadata")
         config = stored
     if not isinstance(config, dict) or not all(k in config for k in ("architecture", "canny")):
         raise ValueError("Checkpoint has no model metadata; supply --config with architecture and canny")
-    if config.get("edge_guidance") is not True:
-        raise ValueError("Independent testing requires Canny V1 (edge_guidance=true)")
+    if config.get("edge_guidance") is not True and config.get("version") != "v2":
+        raise ValueError("Independent testing requires Canny V1 or adaptive V2")
     manifest, pairs = inspect_dataset(dataset_root, training=False)
     model = build_model(config, device)
     state = extract_checkpoint_state_dict(checkpoint)
     try:
         model.load_state_dict(state, strict=True)
     except RuntimeError as error:
-        raise ValueError(f"Checkpoint is incompatible with configured Canny V1: {error}") from error
+        raise ValueError(f"Checkpoint is incompatible with configured model: {error}") from error
     model.eval()
-    print(f"Loaded Canny V1 checkpoint: {checkpoint_path} ({len(state)} tensors)", flush=True)
+    print(f"Loaded checkpoint: {checkpoint_path} ({len(state)} tensors)", flush=True)
     # Refuse overwrites, including incomplete previous exports.
     output_dir.mkdir(parents=True, exist_ok=False)
     images = output_dir / "enhanced_images"

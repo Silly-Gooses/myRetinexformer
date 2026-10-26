@@ -15,6 +15,7 @@ from training_utils import seed_everything, train_one_epoch, EpochWarmupCosine
 from official_workflow import (inspect_dataset, build_loaders, diagnostic_rng, save_weights,
                                storage_probe)
 from protocol_metrics import evaluate_protocol, test_checkpoint, write_csv, protocol_metrics
+from training_utils import save_epoch_visuals
 
 
 def run_smoke(config, root, device, storage=None):
@@ -29,6 +30,22 @@ def run_smoke(config, root, device, storage=None):
     seed_everything(config["seed"])
     train, val, generators = build_loaders(pairs, config, device)
     model = build_model(config, device)
+    if config.get("version") == "v2":
+        sample = next(iter(train))["low"][:1].to(device)
+        prediction, details = model(sample, return_intermediates=True)
+        channels = config["architecture"]["n_feat"]
+        assert details["edge_map"].shape == (1, 1, *sample.shape[-2:])
+        for key in ("rgb_features", "edge_features", "fused_features", "gate_map"):
+            assert details[key].shape == (1, channels, *sample.shape[-2:])
+        assert torch.isfinite(prediction).all() and details["gate_map"].min() >= 0
+        assert details["gate_map"].max() <= 1
+        prediction.abs().mean().backward()
+        fusion = model.body[0].denoiser.fusion
+        assert fusion.edge_encoder[0].weight.grad is not None
+        assert torch.isfinite(fusion.edge_encoder[0].weight.grad).all()
+        if config["gated"]:
+            assert fusion.gate.weight.grad is not None
+        model.zero_grad(set_to_none=True)
     before = {k: v.detach().clone() for k, v in model.state_dict().items()}
     settings = config["optimizer"]
     optimizer = torch.optim.Adam(model.parameters(), lr=config["warmup_start_lr"],
@@ -44,6 +61,8 @@ def run_smoke(config, root, device, storage=None):
     after = {k: v.detach().clone() for k, v in model.state_dict().items()}
     with diagnostic_rng(generators):
         rows, summary = evaluate_protocol(model, val, device)
+        if config.get("version") == "v2":
+            save_epoch_visuals(model, val.dataset, [0], device, root / "visuals")
     assert model.training and all(torch.equal(after[k], v) for k, v in model.state_dict().items())
     write_csv(root / "validation_metrics.csv", ("image", "psnr", "ssim"), rows)
     snapshot = save_weights(root, model, config, 1, 2, 2, "quick_smoke")

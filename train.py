@@ -25,6 +25,7 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 import torch
 
 from RetinexFormer_arch import RetinexFormer
+from Proposed_V2_arch import AdaptiveRetinexFormer, OpenCVCanny
 from canny import CannyEdgeDetector
 from training_utils import (
     EpochWarmupCosine, epoch_learning_rate,
@@ -106,7 +107,11 @@ def validate_config(config):
     if not isinstance(config, dict) or required - config.keys():
         missing = sorted(required - config.keys()) if isinstance(config, dict) else sorted(required)
         raise ValueError(f"Training configuration must be an object with fields: {missing}")
-    for key, expected in (("version", "v1"), ("training_mode", "epoch"),
+    if config["version"] not in ("v1", "v2"):
+        raise ValueError("version must be v1 or v2")
+    if config["version"] == "v2" and type(config.get("gated")) is not bool:
+        raise ValueError("V2 requires gated=true or false")
+    for key, expected in (("training_mode", "epoch"),
                           ("loss", "L1"), ("edge_guidance", True), ("deterministic", True)):
         if config[key] != expected:
             raise ValueError(f"This proposed-model trainer requires {key}={expected!r}")
@@ -131,7 +136,7 @@ def validate_config(config):
     if not isinstance(config["dataset_root"], str) or not config["dataset_root"]:
         raise ValueError("dataset_root must be a nonempty path string")
     epoch_learning_rate(1, **{key: config[key] for key in SCHEDULE_KEYS})
-    CannyEdgeDetector(**config["canny"])
+    (OpenCVCanny if config["version"] == "v2" else CannyEdgeDetector)(**config["canny"])
     optimizer = config["optimizer"]
     if optimizer.get("name") != "Adam" or set(optimizer) != {"name", "betas", "weight_decay"}:
         raise ValueError("optimizer must specify Adam, betas and weight_decay")
@@ -142,7 +147,7 @@ def validate_config(config):
     if set(arch) != {"in_channels", "out_channels", "n_feat", "stage", "num_blocks"}:
         raise ValueError("Unexpected architecture fields")
     if arch["in_channels"] != 3 or arch["out_channels"] != 3:
-        raise ValueError("Proposed v1 requires RGB input/output")
+        raise ValueError("Proposed models require RGB input/output")
     if type(arch["n_feat"]) is not int or arch["n_feat"] < 4 or arch["n_feat"] % 4:
         raise ValueError("n_feat must be a positive multiple of 4")
     if type(arch["stage"]) is not int or arch["stage"] < 1:
@@ -164,11 +169,16 @@ def resolve_device(name, use_amp):
 
 
 def build_model(config, device):
+    if config.get("version") == "v2":
+        return AdaptiveRetinexFormer(**config["architecture"],
+                                    canny_config=config["canny"],
+                                    gated=config.get("gated", True)).to(device)
     return RetinexFormer(**config["architecture"], edge_guidance=True,
                          canny_config=config["canny"]).to(device)
 
 
-def train(config, root, device, *, mode="smoke", resume_from=None, log_every=3):
+def train(config, root, device, *, mode="smoke", resume_from=None, log_every=3,
+          initialize_from=None, initialize_source=None):
     """Build fresh training objects; the helper restores state on explicit resume."""
     validate_config(config)
     should_log_epoch(1, log_every, config["num_epochs"])
@@ -187,6 +197,13 @@ def train(config, root, device, *, mode="smoke", resume_from=None, log_every=3):
         # Match the notebook's original initialization order and seed.
         seed_everything(config["seed"])
         model = build_model(config, device)
+        if initialize_from is not None:
+            if config.get("version") != "v2" or resume_from is not None:
+                raise ValueError("Source initialization requires a fresh V2 run")
+            from analysis_utils import extract_checkpoint_state_dict
+            source_checkpoint = torch.load(initialize_from, map_location="cpu", weights_only=True)
+            model.initialize_from(extract_checkpoint_state_dict(source_checkpoint),
+                                  source=initialize_source)
         settings = config["optimizer"]
         optimizer = torch.optim.Adam(model.parameters(), lr=config["warmup_start_lr"],
                                      betas=tuple(settings["betas"]), weight_decay=settings["weight_decay"])
@@ -229,11 +246,19 @@ def main(argv=None):
     resume.add_argument("--resume", action="store_true", help="Resume this run's checkpoints/last.pth")
     resume.add_argument("--resume-from", type=Path, help="Explicit path to this run's checkpoints/last.pth")
     parser.add_argument("--log-every", type=int, default=3)
+    parser.add_argument("--initialize-from", type=Path,
+                        help="Fresh V2 run: copy shared weights from an E0 or E1 checkpoint")
+    parser.add_argument("--initialize-source", choices=("baseline", "v1"),
+                        help="Source architecture for --initialize-from")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--evaluate-only", action="store_true", help="Independently test best.pth without requiring completed training")
     parser.add_argument("--preflight", action="store_true", help="Audit all 689/100 official pairs without training")
     parser.add_argument("--check-storage", type=Path, help="Save/reload a temporary checkpoint in this mounted Drive/local directory")
     args = parser.parse_args(argv)
+    if bool(args.initialize_from) != bool(args.initialize_source):
+        parser.error("--initialize-from and --initialize-source must be given together")
+    if args.initialize_from and (args.resume or args.resume_from or args.evaluate_only or args.preflight):
+        parser.error("Source initialization requires a fresh training run")
     if args.evaluate_only and (args.mode != "full" or args.resume or args.resume_from):
         parser.error("--evaluate-only requires --mode full and no resume arguments")
     config = json.loads(args.config.read_text())
@@ -252,7 +277,9 @@ def main(argv=None):
     if args.evaluate_only:
         return evaluate(config, root, device)
     resume_from = root / "checkpoints/last.pth" if args.resume else args.resume_from
-    return train(config, root, device, mode=args.mode, resume_from=resume_from, log_every=args.log_every)
+    return train(config, root, device, mode=args.mode, resume_from=resume_from,
+                 log_every=args.log_every, initialize_from=args.initialize_from,
+                 initialize_source=args.initialize_source)
 
 
 if __name__ == "__main__":
