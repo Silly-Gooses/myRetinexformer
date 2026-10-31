@@ -12,12 +12,14 @@ use a separate _Smoke3 directory and retain the full learning-rate schedule.
 import argparse
 from contextlib import contextmanager, redirect_stdout, redirect_stderr
 from datetime import datetime, timezone
+import filecmp
 import sys
 import traceback
 import json
 import math
 import os
 from pathlib import Path
+import shutil
 
 # Must precede CUDA initialization, including when launched outside Colab.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
@@ -34,7 +36,7 @@ from training_utils import (
 
 
 from official_workflow import (PROTOCOL, inspect_dataset, build_loaders, prepare_run,
-                               run_training, storage_probe)
+                               run_training, storage_probe, load_checkpoint)
 from protocol_metrics import test_checkpoint
 
 DEFAULT_EXPERIMENT = "Proposed_RetinexFormer_V1_Official_Epoch200"
@@ -177,8 +179,24 @@ def build_model(config, device):
                          canny_config=config["canny"]).to(device)
 
 
+def preserve_epoch_checkpoint(root, checkpoint, config, manifest):
+    """Keep a complete, immutable stage boundary before last.pth advances."""
+    state = load_checkpoint(checkpoint, config, manifest)
+    epoch = state["completed_epoch"]
+    if epoch < config["num_epochs"]:
+        return None
+    destination = Path(root) / "checkpoints" / f"epoch_{epoch:04d}.pth"
+    if destination.exists():
+        if not filecmp.cmp(checkpoint, destination, shallow=False):
+            raise ValueError(f"Stage checkpoint conflicts with {destination}")
+        return destination
+    with destination.open("xb") as output, Path(checkpoint).open("rb") as source:
+        shutil.copyfileobj(source, output)
+    return destination
+
+
 def train(config, root, device, *, mode="smoke", resume_from=None, log_every=3,
-          initialize_from=None, initialize_source=None):
+          initialize_from=None, initialize_source=None, target_epochs=None):
     """Build fresh training objects; the helper restores state on explicit resume."""
     validate_config(config)
     should_log_epoch(1, log_every, config["num_epochs"])
@@ -186,10 +204,16 @@ def train(config, root, device, *, mode="smoke", resume_from=None, log_every=3,
         raise ValueError("mode must be smoke or full")
     if mode == "smoke" and config["num_epochs"] < 3:
         raise ValueError("Smoke mode requires a schedule with at least 3 epochs")
+    target_epochs = config["num_epochs"] if target_epochs is None else target_epochs
+    if (type(target_epochs) is not int or target_epochs < config["num_epochs"]
+            or (target_epochs > config["num_epochs"] and (resume_from is None or mode != "full"))):
+        raise ValueError("Training extension requires full mode, a resume checkpoint, and target >= original epochs")
     root = Path(root)
     seed_everything(config["seed"])
     manifest, pairs = inspect_dataset(config["dataset_root"])
     prepare_run(root, config, manifest, resume_from)
+    if resume_from is not None:
+        preserve_epoch_checkpoint(root, resume_from, config, manifest)
     session = f"{mode} training | {'resume' if resume_from is not None else 'fresh'}"
     with training_log(root, session):
         print("Training configuration:", json.dumps(config, sort_keys=True), flush=True)
@@ -217,10 +241,18 @@ def train(config, root, device, *, mode="smoke", resume_from=None, log_every=3,
               f"({config['val_freq_steps'] / len(train_loader):.4f} epochs)", flush=True)
         print("Trainable parameters:", sum(p.numel() for p in model.parameters()), flush=True)
         print("Resume:", resume_from or "Fresh training", flush=True)
+        if target_epochs > config["num_epochs"]:
+            print(f"Extension target: {target_epochs} | LR after epoch {config['num_epochs']}: "
+                  f"{config['min_lr']:.8g} (fixed original cosine endpoint)", flush=True)
         history = run_training(
             model, train_loader, val_loader, optimizer, scheduler, scaler,
             device, config, manifest, root, generators, resume_from=resume_from,
-            stop_after_epoch=3 if mode == "smoke" else None, log_every=log_every)
+            stop_after_epoch=3 if mode == "smoke" else None,
+            target_epochs=target_epochs, log_every=log_every)
+        if mode == "full" and history[-1]["epoch"] == target_epochs:
+            archived = preserve_epoch_checkpoint(root, root / "checkpoints/last.pth", config, manifest)
+            if archived is not None:
+                print("Preserved stage checkpoint:", archived, flush=True)
         print(f"{mode.capitalize()} training finished at epoch {history[-1]['epoch']}", flush=True)
         for label, path in (("Best", "checkpoints/best.pth"), ("Last", "checkpoints/last.pth"),
                             ("CSV", "logs/training_metrics.csv"), ("Visuals", "visuals")):
@@ -254,6 +286,7 @@ def main(argv=None):
     parser.add_argument("--evaluate-only", action="store_true", help="Independently test best.pth without requiring completed training")
     parser.add_argument("--preflight", action="store_true", help="Audit all 689/100 official pairs without training")
     parser.add_argument("--check-storage", type=Path, help="Save/reload a temporary checkpoint in this mounted Drive/local directory")
+    parser.add_argument("--target-epochs", type=int, help="Total epochs for an extended full resume; original schedule stays in config")
     args = parser.parse_args(argv)
     if bool(args.initialize_from) != bool(args.initialize_source):
         parser.error("--initialize-from and --initialize-source must be given together")
@@ -279,7 +312,7 @@ def main(argv=None):
     resume_from = root / "checkpoints/last.pth" if args.resume else args.resume_from
     return train(config, root, device, mode=args.mode, resume_from=resume_from,
                  log_every=args.log_every, initialize_from=args.initialize_from,
-                 initialize_source=args.initialize_source)
+                 initialize_source=args.initialize_source, target_epochs=args.target_epochs)
 
 
 if __name__ == "__main__":

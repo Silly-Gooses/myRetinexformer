@@ -81,7 +81,11 @@ class EpochWarmupCosine:
         self.epoch = 0
 
     def set_epoch(self, epoch):
-        lr = epoch_learning_rate(epoch, **self.schedule)
+        # An extension keeps the original cosine endpoint; it never restarts warmup.
+        if type(epoch) is not int or epoch < 1:
+            raise ValueError("epoch must be a positive integer")
+        lr = (self.schedule["min_lr"] if epoch > self.schedule["num_epochs"]
+              else epoch_learning_rate(epoch, **self.schedule))
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.epoch = epoch
@@ -225,14 +229,15 @@ def should_log_epoch(epoch, log_every, num_epochs):
     return epoch == 0 or epoch % log_every == 0 or epoch == num_epochs
 
 
-def write_history(path, history, log_every=1, num_epochs=None):
+def write_history(path, history, log_every=1, num_epochs=None, milestone_epochs=()):
     should_log_epoch(1, log_every, num_epochs)
     def write(temporary):
         with temporary.open("w", newline="") as file:
             writer = csv.DictWriter(file, fieldnames=METRIC_FIELDS)
             writer.writeheader()
             writer.writerows(row for row in history
-                             if should_log_epoch(row["epoch"], log_every, num_epochs))
+                             if should_log_epoch(row["epoch"], log_every, num_epochs)
+                             or row["epoch"] in milestone_epochs)
     _atomic_write(path, write)
 
 

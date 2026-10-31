@@ -114,7 +114,7 @@ def load_checkpoint(path, config, manifest):
         raise ValueError("Checkpoint configuration or dataset manifest differs")
     epoch, step = state["completed_epoch"], state["global_step"]
     batches = math.ceil(len(manifest["splits"]["train"]) / config["batch_size"])
-    if (type(epoch) is not int or not 0 <= epoch <= config["num_epochs"]
+    if (type(epoch) is not int or epoch < 0
             or type(step) is not int or step != epoch * batches
             or state["scheduler"]["epoch"] != epoch
             or [r["epoch"] for r in state["history"]] != list(range(epoch + 1))
@@ -157,7 +157,7 @@ def update_best_alias(root, best):
 
 def run_training(model, train_loader, val_loader, optimizer, scheduler, scaler,
                  device, config, manifest, root, generators, *, resume_from=None,
-                 stop_after_epoch=None, visualize=True, log_every=3):
+                 stop_after_epoch=None, target_epochs=None, visualize=True, log_every=3):
     root = Path(root)
     history, validations, per_image = [], [], []
     global_step, start_epoch, elapsed = 0, 1, 0.
@@ -175,8 +175,10 @@ def run_training(model, train_loader, val_loader, optimizer, scheduler, scaler,
         update_best_alias(root, best)
     elif (root / "checkpoints/last.pth").exists():
         raise FileExistsError("Training already started; resume last.pth")
-    final_epoch = config["num_epochs"] if stop_after_epoch is None else stop_after_epoch
-    if not 1 <= final_epoch <= config["num_epochs"]:
+    target_epochs = config["num_epochs"] if target_epochs is None else target_epochs
+    final_epoch = target_epochs if stop_after_epoch is None else stop_after_epoch
+    if (type(target_epochs) is not int or target_epochs < config["num_epochs"]
+            or not 1 <= final_epoch <= target_epochs or final_epoch < start_epoch - 1):
         raise ValueError("Invalid final epoch")
     indices = np.linspace(0, len(val_loader.dataset)-1,
                           min(config["fixed_vis_count"], len(val_loader.dataset)), dtype=int)
@@ -184,7 +186,8 @@ def run_training(model, train_loader, val_loader, optimizer, scheduler, scaler,
     def logs():
         # The epoch checkpoint is authoritative after an interrupted write/replay.
         write_csv(root / "logs/train_log.csv", METRIC_FIELDS, history)
-        write_history(root / "logs/training_metrics.csv", history, log_every, config["num_epochs"])
+        write_history(root / "logs/training_metrics.csv", history, log_every,
+                      config["num_epochs"], milestone_epochs=(target_epochs,))
         write_csv(root / "logs/validation_log.csv", VAL_FIELDS, validations)
         write_csv(root / "validation/metrics.csv",
                   ("event", "epoch", "batch", "global_step", "kind", "image", "psnr", "ssim", "protocol"), per_image)
@@ -250,7 +253,7 @@ def run_training(model, train_loader, val_loader, optimizer, scheduler, scaler,
             mixup_beta=config["mixup_beta"], grad_clip_norm=config["grad_clip_norm"],
             on_step=after_step, metric_fn=protocol_metrics)
         if epoch == final_epoch and validations[-1]["global_step"] != global_step:
-            validation(epoch, steps, "final" if epoch == config["num_epochs"] else "smoke_final")
+            validation(epoch, steps, "final" if epoch == target_epochs else "smoke_final")
         if epoch == 1 or epoch % config["vis_every"] == 0 or epoch == final_epoch:
             visuals(epoch)
         seconds = time.perf_counter() - started
@@ -263,8 +266,8 @@ def run_training(model, train_loader, val_loader, optimizer, scheduler, scaler,
                             is_best=bool(event and event["is_best"])))
         checkpoint(epoch)
         logs()
-        if should_log_epoch(epoch, log_every, config["num_epochs"]) or epoch == final_epoch:
-            print(f"Epoch {epoch:03d}/{config['num_epochs']} | step {global_step} | "
+        if should_log_epoch(epoch, log_every, target_epochs) or epoch == final_epoch:
+            print(f"Epoch {epoch:03d}/{target_epochs} | step {global_step} | "
                   f"LR {lr:.8g} | train L1 {metrics['train_loss']:.6f} | {seconds:.1f}s", flush=True)
     return history
 

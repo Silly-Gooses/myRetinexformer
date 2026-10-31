@@ -21,8 +21,8 @@ from dataLoader import OfficialPairedDataset
 from official_workflow import (FORMAT, PROTOCOL, build_loaders, inspect_dataset, prepare_run,
                                run_training, load_checkpoint, storage_probe, save_weights)
 from protocol_metrics import protocol_metrics, evaluate_protocol, test_checkpoint
-from training_utils import EpochWarmupCosine, train_one_epoch, seed_everything
-from train import build_model, SCHEDULE_KEYS
+from training_utils import EpochWarmupCosine, train_one_epoch, seed_everything, capture_rng
+from train import build_model, SCHEDULE_KEYS, preserve_epoch_checkpoint
 from official_fixtures import configuration, dataset
 
 
@@ -58,6 +58,73 @@ def components(cfg, workers=0):
 
 
 class OfficialWorkflowTests(unittest.TestCase):
+    def test_resume_smoke_isolated_from_production_checkpoint(self):
+        from resume_smoke import verify
+        with tempfile.TemporaryDirectory() as temporary:
+            cfg = configuration('/unused')
+            cfg.update(batch_size=2)
+            manifest = dict(protocol=PROTOCOL, splits={'train': list(range(5)), 'test': list(range(2))})
+            generators = {'train': torch.Generator().manual_seed(42),
+                          'validation': torch.Generator().manual_seed(43)}
+            loaders = [DataLoader(RandomDataset(5 if key == 'train' else 2),
+                                  batch_size=2 if key == 'train' else 1,
+                                  generator=generators[key]) for key in generators]
+            model = build_model(cfg, 'cpu')
+            optimizer = torch.optim.Adam(model.parameters(), lr=cfg['min_lr'])
+            prediction = model(torch.rand(2, 3, 16, 16))
+            prediction.mean().backward()
+            optimizer.step()
+            scheduler = EpochWarmupCosine(optimizer, **{k: cfg[k] for k in SCHEDULE_KEYS})
+            scheduler.set_epoch(4)
+            checkpoint = Path(temporary) / 'last.pth'
+            torch.save(dict(format=FORMAT, config=cfg, manifest=manifest,
+                            model=model.state_dict(), optimizer=optimizer.state_dict(),
+                            scheduler=scheduler.state_dict(), scaler={},
+                            completed_epoch=4, global_step=12,
+                            history=[dict(epoch=e, global_step=e*3) for e in range(5)],
+                            validation_history=[], per_image=[],
+                            best=dict(psnr=20., ssim=.7, epoch=1, global_step=3),
+                            rng=capture_rng(generators)), checkpoint)
+            original = checkpoint.read_bytes()
+            with patch('resume_smoke.inspect_dataset', return_value=(manifest, {})), \
+                 patch('resume_smoke.build_loaders', return_value=(*loaders, generators)), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                verify(cfg, checkpoint, 6, 'cpu')
+            self.assertEqual(checkpoint.read_bytes(), original)
+            self.assertEqual(list(Path(temporary).iterdir()), [checkpoint])
+
+    def test_full_state_extension_keeps_schedule_history_and_stage_backups(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / 'run'
+            cfg = configuration('/unused')
+            cfg.update(batch_size=2, val_freq_steps=1000)
+            manifest = dict(protocol=PROTOCOL, splits={'train': list(range(5)), 'test': list(range(2))})
+            prepare_run(root, cfg, manifest)
+            self._run(cfg, manifest, root, components(cfg))
+            last = root / 'checkpoints/last.pth'
+            original = last.read_bytes()
+            archive = preserve_epoch_checkpoint(root, last, cfg, manifest)
+            self.assertEqual(archive.read_bytes(), original)
+            prepare_run(root, cfg, manifest, last)
+            history = self._run(cfg, manifest, root, components(cfg),
+                                resume_from=last, target_epochs=6)
+            self.assertEqual([row['epoch'] for row in history], list(range(7)))
+            self.assertEqual(history[-1]['global_step'], 18)
+            self.assertEqual(history[5]['lr'], cfg['min_lr'])
+            self.assertEqual(history[6]['lr'], cfg['min_lr'])
+            state = load_checkpoint(last, cfg, manifest)
+            self.assertEqual(state['scheduler']['epoch'], 6)
+            self.assertGreaterEqual(state['best']['psnr'],
+                                    torch.load(archive, weights_only=True)['best']['psnr'])
+            self.assertEqual(archive.read_bytes(), original)
+            second = preserve_epoch_checkpoint(root, last, cfg, manifest)
+            self.assertEqual(second.name, 'epoch_0006.pth')
+            self.assertEqual(torch.load(second, weights_only=True)['completed_epoch'], 6)
+            with (root / 'logs/validation_log.csv').open() as file:
+                events = list(csv.DictReader(file))
+            self.assertEqual([int(row['global_step']) for row in events], [0, 12, 18])
+            self.assertEqual(len({row['event'] for row in events}), len(events))
+
     def test_preflight_pairing_counts_content_and_no_split(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
