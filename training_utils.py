@@ -267,12 +267,13 @@ def load_epoch_checkpoint(path, config, split):
 
 def train_one_epoch(model, loader, optimizer, scaler, device, use_amp=False,
                     return_metrics=False, *, mixup_beta=None, grad_clip_norm=None,
-                    on_step=None, metric_fn=None, max_steps=None):
+                    on_step=None, metric_fn=None, max_steps=None, on_progress=None):
     """Optionally score each training crop's pre-update output, without another forward.
 
     Legacy callers use clamped, rounded 8-bit metrics. ``metric_fn`` lets the
     official workflow supply unquantized PSNR without changing analysis callers.
     These are online training-mode metrics, not a final-model evaluation pass.
+    ``on_progress`` is an optional smoke-only callback; production passes None.
     """
     model.train()
     total, samples, steps = 0.0, 0, 0
@@ -289,17 +290,29 @@ def train_one_epoch(model, loader, optimizer, scaler, device, use_amp=False,
         if return_metrics and min(low.shape[-2:]) < 11:
             raise ValueError("Training PSNR/SSIM requires crops at least 11 pixels wide and high")
         optimizer.zero_grad(set_to_none=True)
+        if on_progress is not None:
+            on_progress("forward_start", steps + 1)
         with torch.autocast(device_type=torch.device(device).type, enabled=use_amp):
             prediction = model(low)
             loss = F.l1_loss(prediction, high)
+        if on_progress is not None:
+            on_progress("forward", steps + 1)
         if not torch.isfinite(loss):
             raise FloatingPointError("Non-finite training loss; epoch was not checkpointed")
+        if on_progress is not None:
+            on_progress("backward_start", steps + 1)
         scaler.scale(loss).backward()
+        if on_progress is not None:
+            on_progress("backward", steps + 1)
         if grad_clip_norm is not None:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+        if on_progress is not None:
+            on_progress("update_start", steps + 1)
         scaler.step(optimizer)
         scaler.update()
+        if on_progress is not None:
+            on_progress("update", steps + 1)
         if return_metrics:
             for output, gt in zip(prediction.detach().float(), high.detach().float()):
                 if metric_fn is None:

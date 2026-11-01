@@ -10,7 +10,15 @@ checkpoint is included in this repository.
 
 The notebook's smoke and both full experiment cells are opt-in. Run the
 isolated two-update smoke first. Then enable LR / 5 and LR / 10 separately.
-Each starts from the same original best model weights, with a fresh Adam
+Colab smoke requires CUDA, prints the GPU name, and streams timestamped
+checkpoint, dataset, forward, backward, update, validation, and save progress
+directly to the cell. It selects exactly 16 training pairs and two small
+validation pairs from the original manifest without decoding the whole
+dataset. Its two-image PSNR and SSIM are diagnostics only; the smoke run writes
+`smoke_summary.json` and cannot enter production checkpoint selection or
+comparison.
+
+Each full experiment starts from the same original best model weights, with a fresh Adam
 optimizer; neither starts from the other. Set that experiment's `RESUME_*` flag
 after a Colab disconnect to restore its own `latest.pth`. Do not use the
 original run's resume checkpoint for low-LR fine-tuning.

@@ -1,6 +1,8 @@
 """Fast synthetic checks for the isolated fine-tuning control flow."""
 
 import csv
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -9,6 +11,7 @@ from unittest.mock import patch
 
 import torch
 from torch.utils.data import DataLoader, Dataset
+from PIL import Image
 
 import finetune_v2_1 as ft
 
@@ -28,16 +31,30 @@ class FinetuneTests(unittest.TestCase):
         source = root / "original/original_best.pth"
         source_model = torch.nn.Conv2d(3, 3, 1)
         torch.save(dict(model=source_model.state_dict()), source)
+        dataset_root = root / "dataset"
+        splits = {}
+        for split, folder in (("train", "Train"), ("test", "Test")):
+            records = []
+            for index in range(16 if split == "train" else 2):
+                name = f"{index}.png"
+                low = f"{folder}/Low/{name}"
+                normal = f"{folder}/Normal/{name}"
+                for relative, value in ((low, 50 + index), (normal, 150 + index)):
+                    path = dataset_root / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    Image.new("RGB", (12, 12), (value,) * 3).save(path)
+                records.append(dict(name=name, low=low, normal=normal, shape=[12, 12, 3]))
+            splits[split] = records
         config = dict(seed=42, peak_lr=1e-4, optimizer=dict(betas=[.9, .999], weight_decay=0.),
                       use_amp=False, mixup_beta=1.2, grad_clip_norm=.01,
-                      dataset_root="unused")
+                      dataset_root=str(dataset_root), batch_size=8, patch_size=12)
         info = dict(source_checkpoint=str(source), source_sha256=ft.sha256(source),
                     source_format="synthetic", source_epoch=50, source_batch=3,
                     source_global_step=1234, source_effective_lr=5e-5,
                     baseline_psnr=baseline, baseline_ssim=.7,
                     baseline_origin="checkpoint metadata", reference_lr=1e-4,
                     validation_protocol=ft.VALIDATION_PROTOCOL)
-        manifest = dict(protocol=ft.PROTOCOL, splits=dict(train=["0", "1"], test=["0", "1"]))
+        manifest = dict(protocol=ft.PROTOCOL, splits=splits)
         def source_info(*_):
             model = torch.nn.Conv2d(3, 3, 1)
             model.load_state_dict(torch.load(source, weights_only=True)["model"])
@@ -83,10 +100,11 @@ class FinetuneTests(unittest.TestCase):
             source, info, manifest, source_info, loaders = self.fixtures(root)
             original = source.read_bytes()
             with patch.object(ft, "source_info", side_effect=source_info), \
-                 patch.object(ft, "inspect_dataset", return_value=(manifest, {})), \
-                 patch.object(ft, "build_loaders", side_effect=loaders), \
+                 patch.object(ft, "inspect_dataset", side_effect=AssertionError("full audit called")), \
                  patch.object(ft, "build_model", side_effect=lambda *_: torch.nn.Conv2d(3, 3, 1)):
-                output = ft.run(root / "original", root / "outputs", "finetune_lr5", "cpu", smoke=True)
+                captured = io.StringIO()
+                with contextlib.redirect_stdout(captured):
+                    output = ft.run(root / "original", root / "outputs", "finetune_lr5", "cpu", smoke=True)
             self.assertEqual(source.read_bytes(), original)
             self.assertEqual((output / "checkpoints/best.pth").read_bytes(), original)
             with (output / "logs/finetune.csv").open(newline="") as file:
@@ -99,7 +117,24 @@ class FinetuneTests(unittest.TestCase):
                 self.assertEqual(len(list(csv.DictReader(file))), 2)
             saved = torch.load(output / "checkpoints/latest.pth", weights_only=True)
             self.assertEqual(saved["source"]["source_sha256"], info["source_sha256"])
-            self.assertEqual(json.loads((output / "selection.json").read_text())["best"]["additional_epoch"], 0)
+            self.assertFalse((output / "selection.json").exists())
+            summary = json.loads((output / "smoke_summary.json").read_text())
+            self.assertEqual(summary["steps"], 2)
+            self.assertEqual(summary["training_pairs"], 16)
+            self.assertEqual(summary["validation_images"], 2)
+            self.assertFalse(summary["comparable_to_full_validation"])
+            messages = captured.getvalue()
+            for phrase in ("Device: cpu", "Dataset initialization", "First forward pass completed",
+                           "Backward pass completed", "Optimizer update 1/2", "Optimizer update 2/2",
+                           "Smoke validation", "Checkpoint saving"):
+                self.assertIn(phrase, messages)
+            ordered = ("Dataset initialization", "First forward pass starting",
+                       "First forward pass completed", "Backward pass completed",
+                       "Optimizer update 1/2 completed", "Optimizer update 2/2 completed",
+                       "Smoke validation: evaluating", "Checkpoint saving: writing isolated smoke latest.pth")
+            self.assertEqual([messages.index(phrase) for phrase in ordered],
+                             sorted(messages.index(phrase) for phrase in ordered))
+            self.assertRegex(messages, r"\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00\]")
             for name in ("training_loss", "validation_psnr", "validation_ssim", "learning_rate"):
                 self.assertTrue((output / "visuals" / f"{name}.png").is_file())
 

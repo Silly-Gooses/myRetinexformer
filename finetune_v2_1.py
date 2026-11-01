@@ -6,14 +6,17 @@ Scores selected on them are not independent held-out test results.
 
 import argparse
 import csv
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
 from pathlib import Path
 
 import torch
+from torch.utils.data import DataLoader
 
 from analysis_utils import extract_checkpoint_state_dict
+from dataLoader import OfficialPairedDataset
 from diagnostic_analysis import select_checkpoints
 from official_workflow import (PROTOCOL, build_loaders, diagnostic_rng, inspect_dataset,
                                storage_probe)
@@ -32,6 +35,21 @@ VALIDATION_FIELDS = ("additional_epoch", "total_epoch", "global_step", "image",
                      "psnr", "ssim", "protocol")
 
 
+def progress(message):
+    print(f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] {message}", flush=True)
+
+
+def device_summary(device):
+    selected = torch.device(device)
+    if selected.type == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA device selected but unavailable")
+        index = selected.index if selected.index is not None else torch.cuda.current_device()
+        progress(f"Device: cuda:{index} — {torch.cuda.get_device_name(index)}")
+    else:
+        progress(f"Device: {selected.type} (explicit local CPU smoke is supported)")
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with Path(path).open("rb") as file:
@@ -41,8 +59,10 @@ def sha256(path):
 
 
 def source_info(original_root, device="cpu"):
+    progress("Checkpoint loading: locating original epoch-200 archive and best snapshot")
     paths, final = select_checkpoints(original_root)
     source = paths["best"].resolve()
+    progress(f"Checkpoint loading: reading best model weights from {source}")
     state = torch.load(source, map_location="cpu", weights_only=True)
     config = final["config"]
     validate_config(config)
@@ -50,8 +70,10 @@ def source_info(original_root, device="cpu"):
         raise ValueError("Source must be the gated V2 original 200-epoch run")
     if state.get("config") != config or state.get("global_step") != final["best"]["global_step"]:
         raise ValueError("Best snapshot metadata differs from epoch-200 best record")
+    progress("Model initialization: creating gated V2 architecture")
     model = build_model(config, device)
     model.load_state_dict(extract_checkpoint_state_dict(state), strict=True)
+    progress("Model initialization: strict checkpoint load completed")
     epoch = state.get("epoch", state.get("completed_epoch"))
     batch = state.get("batch", 0)
     if epoch != final["best"]["epoch"] or not isinstance(batch, int):
@@ -59,6 +81,7 @@ def source_info(original_root, device="cpu"):
     history = final["history"]
     if not 1 <= epoch < len(history) or history[epoch].get("lr") is None:
         raise ValueError("Original best epoch learning rate is unavailable")
+    progress("Checkpoint loading: hashing original best snapshot")
     info = dict(source_checkpoint=str(source), source_sha256=sha256(source),
                 source_format=state["format"], source_epoch=epoch, source_batch=batch,
                 source_global_step=state["global_step"],
@@ -66,7 +89,40 @@ def source_info(original_root, device="cpu"):
                 baseline_psnr=final["best"]["psnr"], baseline_ssim=final["best"]["ssim"],
                 baseline_origin="epoch-200 checkpoint best metadata",
                 reference_lr=config["peak_lr"], validation_protocol=VALIDATION_PROTOCOL)
+    progress("Checkpoint loading: source metadata checked and SHA-256 recorded")
     return info, config, final["manifest"], model
+
+
+def smoke_pairs(manifest, dataset_root, batch_size):
+    """Select only the images needed by two smoke batches from saved membership."""
+    root = Path(dataset_root).resolve()
+    selected = {}
+    for split, required in (("train", 2 * batch_size), ("test", 2)):
+        records = manifest["splits"][split]
+        if len(records) < required:
+            raise ValueError(f"Smoke requires {required} {split} pairs")
+        ordered = sorted(records, key=lambda r: (r["shape"][0] * r["shape"][1], r["name"]))
+        pairs = []
+        for row in ordered[:required]:
+            low, high = ((root / row[key]).resolve() for key in ("low", "normal"))
+            if any(root not in path.parents or not path.is_file() for path in (low, high)):
+                raise FileNotFoundError(f"Smoke pair missing or outside dataset root: {row['name']}")
+            pairs.append((row["name"], low, high))
+        selected[split] = pairs
+    return selected
+
+
+def build_smoke_loaders(pairs, config, device):
+    """Avoid worker prefetch and loading any image outside the smoke subset."""
+    generators = {"train": torch.Generator().manual_seed(config["seed"]),
+                  "validation": torch.Generator().manual_seed(config["seed"] + 1)}
+    train = DataLoader(OfficialPairedDataset(pairs["train"], config["patch_size"]),
+                       batch_size=config["batch_size"], shuffle=False, num_workers=0,
+                       generator=generators["train"],
+                       pin_memory=torch.device(device).type == "cuda")
+    val = DataLoader(OfficialPairedDataset(pairs["test"]), batch_size=1,
+                     shuffle=False, num_workers=0, generator=generators["validation"])
+    return train, val, generators
 
 
 def cosine_lr(epoch, max_epochs, start_lr):
@@ -145,6 +201,7 @@ def _plots(root, history, info):
 def run(original_root, output_root, experiment, device, *, resume=False,
         max_epochs=30, validation_interval=5, patience=3, min_improvement=0.01,
         smoke=False):
+    device_summary(device)
     info, config, source_manifest, model = source_info(original_root, device)
     settings = settings_for(config, experiment, max_epochs, validation_interval,
                             patience, min_improvement)
@@ -159,11 +216,20 @@ def run(original_root, output_root, experiment, device, *, resume=False,
         raise FileExistsError(f"Run already exists: {root}; use --resume or a new output root")
     if resume and not (root / "checkpoints/latest.pth").is_file():
         raise FileNotFoundError(root / "checkpoints/latest.pth")
-    manifest, pairs = inspect_dataset(config["dataset_root"])
-    if manifest != source_manifest:
-        raise ValueError("Dataset membership/content differs from the original checkpoint")
+    if smoke:
+        progress(f"Dataset initialization: selecting {2 * config['batch_size']} training and 2 validation pairs from checkpoint manifest")
+        manifest = source_manifest
+        pairs = smoke_pairs(manifest, config["dataset_root"], config["batch_size"])
+        progress(f"Dataset initialization: selected {len(pairs['train'])} train and {len(pairs['test'])} validation pairs; full audit skipped")
+    else:
+        manifest, pairs = inspect_dataset(config["dataset_root"])
+        if manifest != source_manifest:
+            raise ValueError("Dataset membership/content differs from the original checkpoint")
     seed_everything(config["seed"])
-    train, val, generators = build_loaders(pairs, config, device)
+    train, val, generators = (build_smoke_loaders(pairs, config, device) if smoke
+                              else build_loaders(pairs, config, device))
+    if smoke and (len(train) != 2 or len(val) != 2):
+        raise AssertionError("Smoke loaders must contain exactly two train and two validation batches")
     optimizer_settings = config["optimizer"]
     optimizer = torch.optim.Adam(model.parameters(), lr=settings["start_lr"],
                                  betas=tuple(optimizer_settings["betas"]),
@@ -178,15 +244,15 @@ def run(original_root, output_root, experiment, device, *, resume=False,
         if (saved.get("format") != FORMAT or saved.get("settings") != settings
                 or saved.get("source") != info or saved.get("manifest") != manifest):
             raise ValueError("Resume checkpoint differs from source, settings, or dataset")
-        progress = saved.get("scheduler", {})
-        if (progress.get("schedule") != "cosine-0.1"
-                or progress.get("epoch") != saved.get("additional_epoch")
-                or not 0 <= progress["epoch"] <= settings["max_additional_epochs"]):
+        schedule_state = saved.get("scheduler", {})
+        if (schedule_state.get("schedule") != "cosine-0.1"
+                or schedule_state.get("epoch") != saved.get("additional_epoch")
+                or not 0 <= schedule_state["epoch"] <= settings["max_additional_epochs"]):
             raise ValueError("Resume scheduler state is inconsistent")
         model.load_state_dict(saved["model"], strict=True)
         optimizer.load_state_dict(saved["optimizer"])
-        expected_lr = cosine_lr(progress["epoch"], settings["max_additional_epochs"],
-                                settings["start_lr"]) if progress["epoch"] else settings["start_lr"]
+        expected_lr = cosine_lr(schedule_state["epoch"], settings["max_additional_epochs"],
+                                settings["start_lr"]) if schedule_state["epoch"] else settings["start_lr"]
         if any(not math.isclose(group["lr"], expected_lr, rel_tol=1e-9)
                for group in optimizer.param_groups):
             raise ValueError("Resume optimizer LR differs from saved scheduler")
@@ -201,6 +267,8 @@ def run(original_root, output_root, experiment, device, *, resume=False,
             print("Run already stopped early; no further epochs", flush=True)
             start_epoch = settings["max_additional_epochs"] + 1
     else:
+        if smoke:
+            progress("Checkpoint saving: creating isolated smoke output and baseline alias")
         root.mkdir(parents=True)
         for name in ("checkpoints", "logs", "visuals"):
             (root / name).mkdir()
@@ -219,6 +287,8 @@ def run(original_root, output_root, experiment, device, *, resume=False,
                             improvement_psnr=0, learning_rate=None, learning_rates=None,
                             best_validation_psnr=best["psnr"], metric_origin=info["baseline_origin"]))
         _logs(root, history, per_image)
+        if smoke:
+            progress("Checkpoint saving: writing isolated initial smoke state")
         _save(root, dict(format=FORMAT, settings=settings, source=info, manifest=manifest,
                          model=model.state_dict(), optimizer=optimizer.state_dict(),
                          scaler=scaler.state_dict(), scheduler=dict(epoch=0, schedule="cosine-0.1"),
@@ -226,6 +296,8 @@ def run(original_root, output_root, experiment, device, *, resume=False,
                          global_step=global_step, history=history, per_image=per_image,
                          best=best, stale=stale, stopping_best=stopping_best,
                          stopped_early=False))
+        if smoke:
+            progress("Checkpoint saving: isolated initial smoke state completed")
     print(f"{experiment}: source {info['source_checkpoint']} sha256={info['source_sha256']}", flush=True)
     print(f"Source epoch {info['source_epoch']} batch {info['source_batch']} step {info['source_global_step']} | "
           f"recorded validation {info['baseline_psnr']:.4f} dB / {info['baseline_ssim']:.4f} SSIM | "
@@ -243,30 +315,55 @@ def run(original_root, output_root, experiment, device, *, resume=False,
         def after_step(_):
             nonlocal global_step
             global_step += 1
-        metrics, steps = train_one_epoch(model, train, optimizer, scaler, device,
-                                         config["use_amp"], True,
+        def on_progress(event, step):
+            if torch.device(device).type == "cuda":
+                torch.cuda.synchronize(device)
+            if event == "forward_start" and step == 1:
+                progress("First forward pass starting")
+            elif event == "forward" and step == 1:
+                progress("First forward pass completed")
+            elif event == "backward_start" and step == 1:
+                progress("Backward pass starting")
+            elif event == "backward" and step == 1:
+                progress("Backward pass completed")
+            elif event == "update_start":
+                progress(f"Optimizer update {step}/2 starting")
+            elif event == "update":
+                progress(f"Optimizer update {step}/2 completed")
+        result, steps = train_one_epoch(model, train, optimizer, scaler, device,
+                                         config["use_amp"], not smoke,
                                          mixup_beta=config["mixup_beta"],
                                          grad_clip_norm=config["grad_clip_norm"],
-                                         on_step=after_step, metric_fn=protocol_metrics,
-                                         max_steps=2 if smoke else None)
-        if smoke and (steps != 2 or not any(not torch.equal(before[k], v) for k, v in model.state_dict().items())):
-            raise AssertionError("Smoke did not perform two weight-changing optimizer updates")
+                                         on_step=after_step, metric_fn=protocol_metrics if not smoke else None,
+                                         max_steps=2 if smoke else None,
+                                         on_progress=on_progress if smoke else None)
+        metrics = {"train_loss": result} if smoke else result
+        if smoke:
+            optimizer_steps = [int(state["step"]) for state in optimizer.state.values()
+                               if "step" in state]
+            if (steps != 2 or not optimizer_steps or any(count != 2 for count in optimizer_steps)
+                    or not any(not torch.equal(before[k], v) for k, v in model.state_dict().items())):
+                raise AssertionError("Smoke did not perform exactly two weight-changing optimizer updates")
         validation = epoch % settings["validation_interval_epochs"] == 0 or epoch == settings["max_additional_epochs"] or smoke
         mean = None
         improved = False
         if validation:
+            if smoke:
+                progress("Smoke validation: evaluating 2 diagnostic batches")
             with diagnostic_rng(generators):
                 rows, mean = evaluate_protocol(model, val, device)
+            if smoke and (mean["count"] != 2 or len(rows) != 2):
+                raise AssertionError("Smoke validation must score exactly two images")
             per_image.extend(dict(additional_epoch=epoch, total_epoch=info["source_epoch"] + epoch,
                                   global_step=global_step, **row, protocol=VALIDATION_PROTOCOL)
                              for row in rows)
-            improved = mean["psnr"] > best["psnr"]
+            improved = not smoke and mean["psnr"] > best["psnr"]
             if improved:
                 best = dict(psnr=mean["psnr"], ssim=mean["ssim"],
                             additional_epoch=epoch, origin="measured fine-tuning validation")
-            if mean["psnr"] >= stopping_best + settings["min_improvement"]:
+            if not smoke and mean["psnr"] >= stopping_best + settings["min_improvement"]:
                 stopping_best, stale = mean["psnr"], 0
-            else:
+            elif not smoke:
                 stale += 1
         history.append(dict(experiment=experiment, source_checkpoint=info["source_checkpoint"],
                             source_sha256=info["source_sha256"], source_epoch=info["source_epoch"],
@@ -275,10 +372,12 @@ def run(original_root, output_root, experiment, device, *, resume=False,
                             global_step=global_step, train_loss=metrics["train_loss"],
                             validation_psnr=mean["psnr"] if mean else None,
                             validation_ssim=mean["ssim"] if mean else None,
-                            improvement_psnr=mean["psnr"] - info["baseline_psnr"] if mean else None,
+                            improvement_psnr=(mean["psnr"] - info["baseline_psnr"]
+                                              if mean and not smoke else None),
                             learning_rate=actual_lrs[0], learning_rates=json.dumps(actual_lrs),
                             best_validation_psnr=best["psnr"],
-                            metric_origin="measured fine-tuning validation" if mean else ""))
+                            metric_origin=("smoke diagnostic (2 images)" if smoke else
+                                           "measured fine-tuning validation") if mean else ""))
         stopped_early = validation and settings["patience"] > 0 and stale >= settings["patience"] and not smoke
         state = dict(format=FORMAT, settings=settings, source=info, manifest=manifest,
                      model=model.state_dict(), optimizer=optimizer.state_dict(),
@@ -287,25 +386,41 @@ def run(original_root, output_root, experiment, device, *, resume=False,
                      global_step=global_step, history=history, per_image=per_image,
                      best=best, stale=stale, stopping_best=stopping_best,
                      stopped_early=stopped_early)
+        if smoke:
+            progress("Checkpoint saving: writing isolated smoke latest.pth")
         _save(root, state, best=improved)
+        if smoke:
+            progress("Checkpoint saving: isolated smoke latest.pth completed")
         _logs(root, history, per_image)
         if mean:
-            print(f"Validation: PSNR {mean['psnr']:.4f}, SSIM {mean['ssim']:.4f}, "
-                  f"delta {mean['psnr'] - info['baseline_psnr']:+.4f} dB", flush=True)
+            if smoke:
+                progress(f"Smoke validation complete: 2 images, PSNR {mean['psnr']:.4f}, SSIM {mean['ssim']:.4f} (diagnostic only)")
+            else:
+                print(f"Validation: PSNR {mean['psnr']:.4f}, SSIM {mean['ssim']:.4f}, "
+                      f"delta {mean['psnr'] - info['baseline_psnr']:+.4f} dB", flush=True)
         if smoke or stopped_early:
             break
+    if smoke:
+        progress("Checkpoint loading: re-hashing original snapshot to confirm it is untouched")
     if sha256(info["source_checkpoint"]) != info["source_sha256"]:
         raise RuntimeError("Original checkpoint changed during fine-tuning")
     if smoke:
+        progress("Checkpoint loading: reloading isolated smoke checkpoint for strict verification")
         reloaded = torch.load(root / "checkpoints/latest.pth", map_location="cpu", weights_only=True)
         clone = build_model(config, device)
         clone.load_state_dict(reloaded["model"], strict=True)
         if not (root / "logs/finetune.csv").is_file() or not (root / "logs/validation_per_image.csv").is_file():
             raise AssertionError("Smoke logs missing")
-    _write_json(root / "selection.json", dict(best=best, checkpoint=str(root / "checkpoints/best.pth"),
-                                               source_sha256=info["source_sha256"],
-                                               validation_protocol=VALIDATION_PROTOCOL,
-                                               held_out=False))
+        _write_json(root / "smoke_summary.json", dict(steps=steps,
+            training_pairs=len(pairs["train"]), validation_images=2,
+            validation_psnr=mean["psnr"], validation_ssim=mean["ssim"],
+            metric_origin="smoke diagnostic (2 images)", source_sha256=info["source_sha256"],
+            held_out=False, comparable_to_full_validation=False))
+    else:
+        _write_json(root / "selection.json", dict(best=best, checkpoint=str(root / "checkpoints/best.pth"),
+                                                   source_sha256=info["source_sha256"],
+                                                   validation_protocol=VALIDATION_PROTOCOL,
+                                                   held_out=False))
     _plots(root, history, info)
     return root
 
