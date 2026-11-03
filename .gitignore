@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.pth
+*.pt
+datasets/
+checkpoints/
+results/
+model_b_test_output/
