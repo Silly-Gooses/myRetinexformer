@@ -9,3 +9,14 @@ model_b_test_output/
 model_d_test_output/
 checkpoints/*
 !checkpoints/README.md
+
+# D-Pro migration inputs and generated/Drive artifacts (never training weights).
+*.zip
+*.pth.*
+*.pt.*
+drive/
+Drive/
+drive_cache/
+migration_inputs/
+model_DPro_budget_v1/
+model_DPro_modular_phase1/

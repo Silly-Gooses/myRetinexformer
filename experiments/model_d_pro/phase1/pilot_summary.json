@@ -1,0 +1,53 @@
+{
+  "version": "dpro_budget_v1.0",
+  "inference_protocol": "DPro_float_interstage_RGB_uint8_metrics",
+  "baseline_protocol": "ModelD_PNG_interstage_RGB_uint8_metrics",
+  "stop_reason": "max_steps",
+  "error": null,
+  "successful_updates": 1200,
+  "target_updates": 1200,
+  "completed": true,
+  "baseline": {
+    "label": "Original Model D",
+    "count": 69,
+    "psnr": 21.071596026390964,
+    "ssim": 0.7342753743764264,
+    "elapsed_seconds": 23.954979465999998,
+    "dataset_sha256": "c298929b9c8484c64d79f8aee9e80233ca437bfbe519c44a4a40c7b4bacc928f",
+    "metric_protocol": "original_RGB_uint8_per_image_mean",
+    "test_evaluated": false
+  },
+  "candidate_float_step0": {
+    "label": "D-Pro FLOAT step 0",
+    "count": 69,
+    "psnr": 21.07202563066632,
+    "ssim": 0.7345752254920945,
+    "elapsed_seconds": 21.78646891699998,
+    "dataset_sha256": "c298929b9c8484c64d79f8aee9e80233ca437bfbe519c44a4a40c7b4bacc928f",
+    "metric_protocol": "original_RGB_uint8_per_image_mean",
+    "test_evaluated": false
+  },
+  "best_validation": {
+    "label": "D-Pro update 900",
+    "count": 69,
+    "psnr": 21.157359333419112,
+    "ssim": 0.7369782498278329,
+    "elapsed_seconds": 22.570713473999945,
+    "dataset_sha256": "c298929b9c8484c64d79f8aee9e80233ca437bfbe519c44a4a40c7b4bacc928f",
+    "metric_protocol": "original_RGB_uint8_per_image_mean",
+    "test_evaluated": false
+  },
+  "best_step": 900,
+  "delta_psnr_vs_model_d": 0.08576330702814872,
+  "delta_ssim_vs_model_d": 0.0027028754514064612,
+  "delta_psnr_vs_candidate_step0": 0.0853337027527914,
+  "decision": "PROMISING_PILOT_REVIEW_BEFORE_EXTENDING",
+  "test_evaluated": false,
+  "full_training": false,
+  "thresholds_are_heuristic_not_statistical_significance": true,
+  "final_test_target_db": 23.1,
+  "final_test_target_achieved": null,
+  "session_elapsed_seconds": 684.11121084,
+  "total_train_seconds": 431.68515594400077,
+  "output": "/content/drive/MyDrive/RetinexFormer_NAF_Screening/model_DPro_budget_v1/pilot_01"
+}

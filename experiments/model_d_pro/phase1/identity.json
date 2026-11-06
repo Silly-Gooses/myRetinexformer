@@ -1,0 +1,28 @@
+{
+  "version": "dpro_budget_v1.0",
+  "commit": "108b14cc0d84c070a8331772b99789359a4f3137",
+  "script_sha256": "52b1ca3bfd059fe2584875d79f108a835ebd05d2ea22e40afd487a2b5debb4da",
+  "backbone_sha256": "1cb495fc19ce1560a1b50bd9eef16e10e3c3184351e9ac6fe03ccc31e1b91ae6",
+  "head_sha256": "cebbc55c59906fc2d0be453f16660b3d0dadc14bae150ef97c8fcce29c331ca0",
+  "train_sha256": "36ef4eaac4d171c2ab11ef1d121e18575dd543646890d494129c14e08811f045",
+  "val_sha256": "c298929b9c8484c64d79f8aee9e80233ca437bfbe519c44a4a40c7b4bacc928f",
+  "recipe": {
+    "seed": 42,
+    "patch": 128,
+    "micro_batch": 2,
+    "accumulation": 4,
+    "max_steps": 1200,
+    "warmup_steps": 100,
+    "validate_every": 300,
+    "save_every": 100,
+    "learning_rates": {
+      "backbone": 1e-05,
+      "legacy_head": 2e-05,
+      "new": 0.0001
+    },
+    "patience_evals": 3,
+    "min_early_stop_step": 900,
+    "patience_min_delta": 0.01,
+    "step0_max_abs_psnr_delta": 0.1
+  }
+}

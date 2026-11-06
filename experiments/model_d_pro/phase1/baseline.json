@@ -1,0 +1,10 @@
+{
+  "label": "Original Model D",
+  "count": 69,
+  "psnr": 21.071596026390964,
+  "ssim": 0.7342753743764264,
+  "elapsed_seconds": 23.954979465999998,
+  "dataset_sha256": "c298929b9c8484c64d79f8aee9e80233ca437bfbe519c44a4a40c7b4bacc928f",
+  "metric_protocol": "original_RGB_uint8_per_image_mean",
+  "test_evaluated": false
+}

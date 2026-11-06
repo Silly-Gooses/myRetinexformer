@@ -1,0 +1,9 @@
+{
+  "python": "3.13.16",
+  "torch": "2.11.0+cu130",
+  "numpy": "2.4.6",
+  "cuda": "13.0",
+  "gpu": "Tesla T4",
+  "commit": "108b14cc0d84c070a8331772b99789359a4f3137",
+  "deterministic_algorithms": false
+}

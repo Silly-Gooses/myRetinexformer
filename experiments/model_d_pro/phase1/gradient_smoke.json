@@ -1,0 +1,21 @@
+{
+  "float_identity_max_abs": 0.0,
+  "inverse_max_abs": 0.0,
+  "neutral_gradients_finite": true,
+  "gradient_groups": {
+    "backbone": {
+      "finite": true,
+      "any_nonzero": true
+    },
+    "legacy_head": {
+      "finite": true,
+      "any_nonzero": true
+    },
+    "new": {
+      "finite": true,
+      "any_nonzero": true
+    }
+  },
+  "micro_batch_seconds": 2.167635709000024,
+  "peak_allocated_gib": 0.5558285713195801
+}

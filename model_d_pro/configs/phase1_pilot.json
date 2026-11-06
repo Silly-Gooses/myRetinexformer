@@ -1,0 +1,27 @@
+{
+  "data_root": "/content/drive/MyDrive/datasets/LOLv2/Real_captured",
+  "model_b": "/content/drive/MyDrive/RetinexFormer_NAF_Screening/model_B_optionA_batch8_patch128_lr1e-5_from_batch8best/low_lr_1e-5_1000steps/best.pth",
+  "head": "/content/drive/MyDrive/RetinexFormer_NAF_Screening/model_D_HVI_from_ModelB_OptionA_v1/best_model_d_head.pth",
+  "split_file": "/content/drive/MyDrive/RetinexFormer_NAF_Screening/model_B_v1_full_data_1000steps/split.json",
+  "output_root": "/content/drive/MyDrive/RetinexFormer_NAF_Screening/model_DPro_modular_phase1",
+  "run_name": "phase1_01",
+  "resume": false,
+  "require_t4": true,
+  "seed": 42,
+  "patch": 128,
+  "micro_batch": 2,
+  "accumulation": 4,
+  "max_steps": 1200,
+  "warmup_steps": 100,
+  "validate_every": 300,
+  "save_every": 100,
+  "learning_rates": {
+    "backbone": 1e-05,
+    "legacy_head": 2e-05,
+    "new": 0.0001
+  },
+  "patience_evals": 3,
+  "min_early_stop_step": 900,
+  "patience_min_delta": 0.01,
+  "step0_max_abs_psnr_delta": 0.1
+}

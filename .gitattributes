@@ -1,2 +1,6 @@
 # Preserve the archived notebook's SHA256 across Windows and Colab checkouts.
 tests/reference_Model_D_v1.ipynb -text
+tests/fixtures/dpro_pilot.py -text
+experiments/model_d_pro/phase1/*.json -text
+# Archived CSVs retain their original CR/CRLF bytes for provenance.
+experiments/model_d_pro/phase1/*.csv -text whitespace=-blank-at-eol
