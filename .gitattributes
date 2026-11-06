@@ -1,0 +1,2 @@
+# Preserve the archived notebook's SHA256 across Windows and Colab checkouts.
+tests/reference_Model_D_v1.ipynb -text

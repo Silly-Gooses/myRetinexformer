@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+*.pth
+*.pt
+datasets/
+results/
+model_b_test_output/
+model_d_test_output/
+checkpoints/*
+!checkpoints/README.md

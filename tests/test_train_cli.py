@@ -85,7 +85,7 @@ class TrainCLITests(unittest.TestCase):
             root = Path(temporary)
             data = root/'datasets/LOLv2/Real_captured'
             dataset(data)
-            source = config_cell.replace('/content/drive/MyDrive', str(root))
+            source = config_cell.replace('/content/drive/MyDrive', root.as_posix())
             source = source.replace('PATCH_SIZE = 256', 'PATCH_SIZE = 16').replace('NUM_WORKERS = 2', 'NUM_WORKERS = 0')
             context = {}
             with contextlib.redirect_stdout(io.StringIO()):
@@ -195,10 +195,10 @@ class TrainCLITests(unittest.TestCase):
                         warnings.simplefilter('always')
                         warnings.warn('example warning')
                     # Writes are visible while the run is still open.
-                    saved = (root/'logs/training.log').read_text()
+                    saved = (root/'logs/training.log').read_text(encoding='utf-8')
                     self.assertIn('epoch message မြန်မာ', saved)
                     self.assertIn('example warning', saved)
-                before = (root/'logs/training.log').read_text()
+                before = (root/'logs/training.log').read_text(encoding='utf-8')
                 with self.assertRaisesRegex(RuntimeError, 'training failed'):
                     with training_log(root, 'resume'):
                         print('continuing')
@@ -208,7 +208,7 @@ class TrainCLITests(unittest.TestCase):
                 with self.assertRaises(KeyboardInterrupt):
                     with training_log(root, 'resume'):
                         raise KeyboardInterrupt()
-            saved = (root/'logs/training.log').read_text()
+            saved = (root/'logs/training.log').read_text(encoding='utf-8')
             self.assertTrue(saved.startswith(before))
             self.assertIn('RuntimeError: training failed', saved)
             self.assertIn('KeyboardInterrupt', saved)
