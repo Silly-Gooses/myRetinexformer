@@ -1,0 +1,5 @@
+torch>=2.1
+einops
+numpy
+opencv-python
+huggingface_hub>=0.23

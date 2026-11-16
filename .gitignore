@@ -1,0 +1,4 @@
+__pycache__/
+.fusion-local/
+fusion-runs/
+*.pth
