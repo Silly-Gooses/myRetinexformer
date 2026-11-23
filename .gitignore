@@ -2,3 +2,18 @@ __pycache__/
 .fusion-local/
 fusion-runs/
 *.pth
+
+# Joint fusion data and generated artifacts (compact references are explicitly tracked).
+datasets/
+checkpoints/
+joint-fusion-runs/
+**/predictions/
+**/train_fit_per_image_coefficients.csv
+*.pt
+*.ckpt
+*.zip
+.env
+.env.*
+credentials.json
+token.json
+.ipynb_checkpoints/

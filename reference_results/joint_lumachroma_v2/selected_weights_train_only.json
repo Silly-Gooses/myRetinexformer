@@ -1,0 +1,49 @@
+{
+  "experiment": "regjoint_v2",
+  "local": {
+    "LOLv1": {
+      "alpha_rgb": 0.5732670842622526,
+      "alpha_y": 0.5395529595278046,
+      "alpha_c": 0.6430078323195435,
+      "alpha_y_regularized": 0.528835328568009,
+      "alpha_c_regularized": 0.5840037054470191,
+      "lambda_regularized": 1.0,
+      "n_fit": 485
+    },
+    "LOLv2_Real": {
+      "alpha_rgb": 0.9692347343334424,
+      "alpha_y": 1.0,
+      "alpha_c": 0.7772154684111126,
+      "alpha_y_regularized": 1.0,
+      "alpha_c_regularized": 0.7617456417018434,
+      "lambda_regularized": 0.05,
+      "n_fit": 689
+    },
+    "LOLv2_Synthetic": {
+      "alpha_rgb": 0.03296272995619425,
+      "alpha_y": 0.028404952966048187,
+      "alpha_c": 0.07042356676340049,
+      "alpha_y_regularized": 0.03376011077424524,
+      "alpha_c_regularized": 0.09510286715762895,
+      "lambda_regularized": 0.2,
+      "n_fit": 900
+    }
+  },
+  "joint": {
+    "alpha_y": 0.25282374946029795,
+    "alpha_c": 0.34938125935218756,
+    "alpha_y_regularized": 0.2992029777427523,
+    "alpha_c_regularized": 0.40713060525512,
+    "lambda_regularized": 0.5
+  },
+  "lambda_grid": [
+    0.0,
+    0.05,
+    0.2,
+    0.5,
+    1.0,
+    2.0,
+    5.0
+  ],
+  "selection_rule": "3fold Train-only CV; neutral prior center=.5; mean fold PSNR; stronger lambda on ties within .005dB"
+}

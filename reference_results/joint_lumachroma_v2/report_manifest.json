@@ -1,0 +1,92 @@
+{
+  "experiment": "Regularized + Joint Luminance-Chrominance Fusion v2",
+  "timestamp_utc": "2026-11-23T05:53:39.052802+00:00",
+  "sources": {
+    "RetinexFormer": "2dd9ae05f34a34e2df3b955f743215ac3cda0f82",
+    "HVI-CIDNet": "eb43d7d91e9a336c66856824ff9e4603ae41f408"
+  },
+  "method": "two frozen pretrained checkpoints per dataset; YCrCb separate Y and Cr/Cb blending",
+  "train_fit": "original Train only; all pairs by default; deterministic Train CV folds",
+  "test_policy": "no Test-based weight selection; no GT during output generation; no GT-mean; no x8 TTA",
+  "methods": [
+    "ret",
+    "hvi",
+    "rgb_fit",
+    "ycc_fit",
+    "ycc_regularized",
+    "ycc_joint",
+    "ycc_joint_regularized"
+  ],
+  "parameter_selection": {
+    "experiment": "regjoint_v2",
+    "local": {
+      "LOLv1": {
+        "alpha_rgb": 0.5732670842622526,
+        "alpha_y": 0.5395529595278046,
+        "alpha_c": 0.6430078323195435,
+        "alpha_y_regularized": 0.528835328568009,
+        "alpha_c_regularized": 0.5840037054470191,
+        "lambda_regularized": 1.0,
+        "n_fit": 485
+      },
+      "LOLv2_Real": {
+        "alpha_rgb": 0.9692347343334424,
+        "alpha_y": 1.0,
+        "alpha_c": 0.7772154684111126,
+        "alpha_y_regularized": 1.0,
+        "alpha_c_regularized": 0.7617456417018434,
+        "lambda_regularized": 0.05,
+        "n_fit": 689
+      },
+      "LOLv2_Synthetic": {
+        "alpha_rgb": 0.03296272995619425,
+        "alpha_y": 0.028404952966048187,
+        "alpha_c": 0.07042356676340049,
+        "alpha_y_regularized": 0.03376011077424524,
+        "alpha_c_regularized": 0.09510286715762895,
+        "lambda_regularized": 0.2,
+        "n_fit": 900
+      }
+    },
+    "joint": {
+      "alpha_y": 0.25282374946029795,
+      "alpha_c": 0.34938125935218756,
+      "alpha_y_regularized": 0.2992029777427523,
+      "alpha_c_regularized": 0.40713060525512,
+      "lambda_regularized": 0.5
+    },
+    "lambda_grid": [
+      0.0,
+      0.05,
+      0.2,
+      0.5,
+      1.0,
+      2.0,
+      5.0
+    ],
+    "selection_rule": "3fold Train-only CV; neutral prior center=.5; mean fold PSNR; stronger lambda on ties within .005dB"
+  },
+  "limitations": [
+    "Teacher pretrained checkpoints may have seen original Train images, including CV held-out images.",
+    "Train-optimized scoring uses unclipped RGB approximation; final Test fusion clamps to [0,1].",
+    "The Test benchmarks have already been inspected in earlier exploratory work.",
+    "Joint fusion weights do not make the underlying dataset-specific teacher models universal.",
+    "Regularization and joint fitting may reduce PSNR; no improvement is guaranteed."
+  ],
+  "checkpoint_hashes": {
+    "LOLv1": {
+      "ret": "9b4810dc51322fab70be8658ee0ad1df64a54aa814497b7849767baa2ff32cd1",
+      "hvi": "9206385b514014b60bf9396151a011cabf68abb380c2ad87ffde3d53e8227926"
+    },
+    "LOLv2_Real": {
+      "ret": "539bd16c4da6179e45616329f249c4672951b1045193428e1d042c50d4b65a0b",
+      "hvi": "44a7f92cf02a1da322c1a34b3aa940341dc93fd53840b7f19b49f461200b00a6"
+    },
+    "LOLv2_Synthetic": {
+      "ret": "2f793853c6b1ba0b4a3ff12b7b10f0f2c851eaefda1006437eb3f35229838c4a",
+      "hvi": "519cc5fc55491cf36b47b8295c0204dde29ba887feeed06a77e716072469e55e"
+    }
+  },
+  "smoke_max_test": null,
+  "result_status": "previously_measured_reference_not_reproduced_by_this_refactor"
+}

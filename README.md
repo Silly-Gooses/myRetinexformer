@@ -1,3 +1,7 @@
+# Joint regularized luminance–chrominance fusion v2
+
+The notebook-faithful v2 implementation adds Train-only fitting of two shared fusion weights across LOL-v1, LOL-v2 Real, and LOL-v2 Synthetic, with frozen dataset-specific RetinexFormer/HVI checkpoints. See the [method and reproduction instructions](docs/joint_lumachroma_fusion.md), [Colab notebook](notebooks/RetinexFormer_HVI_RegularizedJoint_LuminanceChrominance_v2_Colab.ipynb), and [previously measured reference results](reference_results/joint_lumachroma_v2/README.md). The existing fixed-fusion experiment is unchanged.
+
 # RetinexFormer ×8 + HVI-CIDNet fixed fusion
 
 This branch enhances low-light RGB images with a training-free ensemble of two pretrained networks. RetinexFormer runs on eight orientations of the same image. Its averaged prediction contributes 25% of each output pixel, and HVI-CIDNet contributes 75%. Both networks keep their original learned weights.

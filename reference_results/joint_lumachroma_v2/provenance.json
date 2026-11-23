@@ -1,0 +1,18 @@
+{
+  "status": "previously measured reference",
+  "notebook": "RetinexFormer_HVI_RegularizedJoint_LuminanceChrominance_v2_Colab.ipynb",
+  "notebook_sha256": "6da295d6069a93080333613bee122aa556d2ad01a8e59d07f8122ba750c8675f",
+  "report_archive": "RetinexFormer_HVI_RegularizedJoint_LumaChroma_Report.zip",
+  "report_sha256": "246ba7997eeeafa7d8eb74c49082f8a7c715dd2210bf8ad095613c0be1ab1606",
+  "unaltered_files_sha256": {
+    "selected_weights_train_only.json": "e4a2c3a67839155b490c59c6211a77a65f96c0af3632e16c3723608b17092fbf",
+    "test_summary.csv": "059b5f8183ed3278506764edbe764c9f14fd5737109253ef33810cc70831430b",
+    "test_per_image_all.csv": "e7666588e4492a4a96de9e3fb5bd059a89b9d31b598eeb0ee87d7bca14e18d9c",
+    "train_cross_validation_folds.csv": "4188d6a358a286745d64b312ccc4bf3afbeb2a7d5fe31dfd2ee391a7b9e91843",
+    "train_cross_validation_summary.csv": "d0108ccb8bb4782df08d9dda7779f90412558a4aacb8af8b6f663ed934e9934b"
+  },
+  "manifest_changes": [
+    "removed output_directory",
+    "added explicit reference result_status"
+  ]
+}
